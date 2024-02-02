@@ -3,11 +3,13 @@
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
 #include <cassert>
+#include <chrono>
+#include <iomanip>
 #include <iostream>
 
 //#define DEBUG_MODE
 //#define DEBUG_MODE_VERBOSE
-//#define FIRST_ENGINE_IS_STORAGE_ENGINE
+#define FIRST_ENGINE_IS_STORAGE_ENGINE
 
 using std::string_literals::operator""s;
 using boss::utilities::operator""_;
@@ -226,19 +228,39 @@ static ComplexExpression& getTableReference(ComplexExpression& e, // NOLINT
   return _false;
 }
 
+static Expression evaluateDateObject(const ComplexExpression& e) {
+  if(std::holds_alternative<std::string>(e.getDynamicArguments().at(0))) {
+    auto str = std::get<std::string>(e.getDynamicArguments().at(0));
+    std::istringstream iss;
+    iss.str(std::string(str));
+    struct std::tm tm = {};
+    iss >> std::get_time(&tm, "%Y-%m-%d");
+    auto t = std::mktime(&tm);
+    static int const hoursInADay = 24;
+    return (int32_t)(std::chrono::duration_cast<std::chrono::hours>(
+                         std::chrono::system_clock::from_time_t(t).time_since_epoch())
+                         .count() /
+                     hoursInADay);
+  } else {
+    throw std::runtime_error("DateObject_ does not contain a string");
+  }
+}
+
 /* Precondition: There is at most one pipeline breaker */
 static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) { // NOLINT
   auto& dynamics = e.getDynamicArguments();
   ExpressionArguments copiedDynamics;
   copiedDynamics.reserve(dynamics.size());
   std::for_each(dynamics.begin(), dynamics.end(), [&copiedDynamics](auto& dynamic) {
-    if(std::holds_alternative<ComplexExpression>(dynamic) &&
-       get<ComplexExpression>(dynamic).getHead() != "Table"_)
-      copiedDynamics.push_back(generateSubExpressionClone(get<ComplexExpression>(dynamic)));
-    else if(std::holds_alternative<ComplexExpression>(dynamic) &&
-            get<ComplexExpression>(dynamic).getHead() == "Table"_)
-      copiedDynamics.push_back(ComplexExpression("Table"_, {}, {}, {}));
-    else {
+    if(std::holds_alternative<ComplexExpression>(dynamic)) {
+      if(get<ComplexExpression>(dynamic).getHead() == "Table"_) {
+        copiedDynamics.push_back(ComplexExpression("Table"_, {}, {}, {}));
+      } else if(get<ComplexExpression>(dynamic).getHead() == "DateObject"_) {
+        copiedDynamics.push_back(evaluateDateObject(get<ComplexExpression>(dynamic)));
+      } else {
+        copiedDynamics.push_back(generateSubExpressionClone(get<ComplexExpression>(dynamic)));
+      }
+    } else {
       std::visit(
           [&copiedDynamics](auto& value) {
             using T = std::decay_t<decltype(value)>;

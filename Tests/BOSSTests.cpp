@@ -228,7 +228,7 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
                    createTwoTwoNumFloatSpans(17954.55, 34850.16, 7712.48, 25284.00)), // NOLINT
                "L_DISCOUNT"_(createTwoTwoNumFloatSpans(0.10, 0.05, 0.06, 0.06)),      // NOLINT
                "L_TAX"_(createTwoTwoNumFloatSpans(0.02, 0.06, 0.02, 0.06)),           // NOLINT
-               "L_SHIPDATE"_(createTwoTwoNumIntSpans(1992, 1994, 1996, 1994)));       // NOLINT
+               "L_SHIPDATE"_(createTwoTwoNumIntSpans(8400, 9130, 9861, 9130)));       // NOLINT
 
   SECTION("Q6 (No Grouping)") {
     auto output = eval("Project"_(
@@ -239,7 +239,8 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
             "Where"_("And"_("Greater"_(24, "L_QUANTITY"_),      // NOLINT
                             "Greater"_("L_DISCOUNT"_, 0.0499),  // NOLINT
                             "Greater"_(0.07001, "L_DISCOUNT"_), // NOLINT
-                            "Greater"_(1995, "L_SHIPDATE"_), "Greater"_("L_SHIPDATE"_, 1993)))),
+                            "Greater"_("DateObject"_("1995-12-31"), "L_SHIPDATE"_),
+                            "Greater"_("L_SHIPDATE"_, "DateObject"_("1993-12-31"))))),
         "As"_("revenue"_, "Times"_("L_EXTENDEDPRICE"_, "L_DISCOUNT"_))));
 
     CHECK(output == "Table"_("revenue"_("List"_(34850.16 * 0.05, 25284.00 * 0.06)))); // NOLINT
@@ -254,8 +255,8 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
                                       "Where"_("And"_("Greater"_(24, "L_QUANTITY"_),      // NOLINT
                                                       "Greater"_("L_DISCOUNT"_, 0.0499),  // NOLINT
                                                       "Greater"_(0.07001, "L_DISCOUNT"_), // NOLINT
-                                                      "Greater"_(1995, "L_SHIPDATE"_),
-                                                      "Greater"_("L_SHIPDATE"_, 1993)))),
+                                                      "Greater"_("DateObject"_("1995-12-31"), "L_SHIPDATE"_),
+                                                      "Greater"_("L_SHIPDATE"_, "DateObject"_("1993-12-31"))))),
                             "As"_("revenue"_, "Times"_("L_EXTENDEDPRICE"_, "L_DISCOUNT"_))),
                  "Sum"_("revenue"_)));
 
