@@ -139,7 +139,11 @@ else()
   set(pluginInstallDir lib)
 endif(MSVC)
 
-set(ImplementationFiles Source/BOSSVectorizationCoordinatorEngine.cpp)
+set(ImplementationFiles
+        Source/BOSSVectorizationCoordinatorEngine.cpp
+        /home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
+        # /repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
+)
 
 add_library(BOSSVectorizationCoordinatorEngine MODULE ${ImplementationFiles})
 set_property(TARGET BOSSVectorizationCoordinatorEngine PROPERTY CXX_STANDARD 20) ## the core is c++ 17 but the engines may want to use 20

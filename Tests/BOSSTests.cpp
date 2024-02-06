@@ -130,12 +130,21 @@ TEST_CASE("Delegate bootstrapping - select multiple spans", "[vectorization-engi
     auto table = "Table"_("key"_(createTwoSpansIntStartingFrom(0)),
                           "payload"_(createTwoSpansIntStartingFrom(4)));
     auto result = eval("Select"_(std::move(table),
+                                 "Where"_("Greater"_("key"_, 0))));
+
+    CHECK(result == "Table"_("key"_("List"_(1, 2, 3)), "payload"_("List"_(5, 6, 7))));
+  }
+
+  SECTION("Delegate bootstrapping - select multiple spans 2") {
+    auto table = "Table"_("key"_(createTwoSpansIntStartingFrom(0)),
+                          "payload"_(createTwoSpansIntStartingFrom(4)));
+    auto result = eval("Select"_(std::move(table),
                                  "Where"_("And"_("Greater"_("key"_, 0), "Greater"_(3, "key"_)))));
 
     CHECK(result == "Table"_("key"_("List"_(1, 2)), "payload"_("List"_(5, 6))));
   }
 
-  SECTION("Delegate bootstrapping - select multiple spans 2") {
+  SECTION("Delegate bootstrapping - select multiple spans 3") {
     auto table = "Table"_("key"_(createTwoSpansIntStartingFrom(0)),
                           "payload"_(createTwoSpansIntStartingFrom(4)));
     auto result = eval("Select"_(
