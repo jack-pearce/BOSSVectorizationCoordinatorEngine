@@ -10,8 +10,8 @@
 #include "/home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 // #include "/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 
-//#define DEBUG_MODE
-//#define DEBUG_MODE_VERBOSE
+// #define DEBUG_MODE
+// #define DEBUG_MODE_VERBOSE
 #define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
@@ -24,6 +24,7 @@ using boss::ExpressionArguments;
 using boss::Span;
 using boss::Symbol;
 using ExpressionSpanArguments = boss::DefaultExpressionSystem::ExpressionSpanArguments;
+using ExpressionSpanArgument = boss::DefaultExpressionSystem::ExpressionSpanArgument;
 template <typename... T>
 using ComplexExpressionWithStaticArguments =
     boss::DefaultExpressionSystem::ComplexExpressionWithStaticArguments<T...>;
@@ -206,19 +207,15 @@ static ComplexExpression unionTables(ExpressionArguments&& tables) {
     auto [unused1_, unused2_, columns, unused3_] =
         get<ComplexExpression>(std::move(*it++)).decompose();
     for(auto&& column : columns) {
-      auto&& span = std::move(
+      auto&& span = const_cast<ExpressionSpanArgument&&>(std::move(
           get<ComplexExpression>(get<ComplexExpression>(column).getDynamicArguments().at(0))
               .getSpanArguments()
-              .at(0));
+              .at(0)));
       auto& spans = const_cast<ExpressionSpanArguments&>(
           get<ComplexExpression>(
               get<ComplexExpression>(*resultColumnsIt).getDynamicArguments().at(0))
               .getSpanArguments());
-      std::visit(
-          [&spans]<typename T>(const Span<T>&& typedSpan) {
-            spans.push_back(std::move(const_cast<Span<T>&&>(typedSpan)));
-          },
-          std::move(span));
+      spans.push_back(std::move(span));
       resultColumnsIt++;
     }
   }
@@ -271,13 +268,10 @@ static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_
   auto destDynamics = ExpressionArguments{};
   for(const auto& column : exprTable.getDynamicArguments()) {
     auto& columnList = get<ComplexExpression>(column).getDynamicArguments().at(0);
-    auto&& span = std::move(get<ComplexExpression>(columnList).getSpanArguments().at(batchNum));
+    auto&& span = const_cast<ExpressionSpanArgument&&>(
+        std::move(get<ComplexExpression>(columnList).getSpanArguments().at(batchNum)));
     ExpressionSpanArguments spans{};
-    std::visit(
-        [&spans]<typename T>(const Span<T>&& typedSpan) {
-          spans.push_back(std::move(const_cast<Span<T>&&>(typedSpan)));
-        },
-        std::move(span));
+    spans.emplace_back(std::move(span));
     auto destListExpr = ComplexExpression("List"_, {}, {}, std::move(spans));
     auto destColDynamics = ExpressionArguments{};
     destColDynamics.push_back(std::move(destListExpr));
