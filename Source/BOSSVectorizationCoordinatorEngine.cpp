@@ -81,13 +81,13 @@ static ComplexExpression addIdToPredicates(ComplexExpression&& expr, int& predic
       std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
       std::back_inserter(outputDynamics), [&predicateCount](auto&& arg_) -> ComplexExpression {
         auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
-        if(arg.getHead() == "And"_) {
+        if(arg.getHead().getName() == "And") {
           return addIdToPredicates(std::move(arg), predicateCount);
         }
         auto [predHead, unused1, predDynamics, unused2] = std::move(arg).decompose();
         ExpressionArguments idDynamics;
         idDynamics.emplace_back(predicateCount++);
-        auto idExpr = ComplexExpression(Symbol("PredicateID"), {}, std::move(idDynamics), {});
+        auto idExpr = ComplexExpression("PredicateID"_, {}, std::move(idDynamics), {});
         predDynamics.emplace_back(std::move(idExpr));
         return {std::move(predHead), {}, std::move(predDynamics), {}};
       });
@@ -105,7 +105,7 @@ static ComplexExpression prepareExpressionForHazardAdaptiveEngineAux(ComplexExpr
                  std::back_inserter(outputDynamics), [&predicateCount](auto&& arg_) -> Expression {
                    if(std::holds_alternative<ComplexExpression>(arg_)) {
                      auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
-                     if(arg.getHead() == "Where"_) {
+                     if(arg.getHead().getName() == "Where") {
                        return addIdToPredicates(std::move(arg), predicateCount);
                      }
                      return prepareExpressionForHazardAdaptiveEngineAux(std::move(arg),
@@ -139,7 +139,7 @@ static ComplexExpression prepareExpressionForHazardAdaptiveEngine(ComplexExpress
 }
 
 static ComplexExpression stripRootLetFromExpressionAndFree(ComplexExpression&& expr) {
-  if(expr.getHead() == "Let"_) {
+  if(expr.getHead().getName() == "Let") {
     auto [unused1, unused2, dynamics, unused3] = std::move(expr).decompose();
     auto selectOperatorStates = reinterpret_cast<adaptive::SelectOperatorStates*>(
         get<int64_t>(get<ComplexExpression>(dynamics.at(1)).getDynamicArguments().at(0)));
@@ -151,10 +151,10 @@ static ComplexExpression stripRootLetFromExpressionAndFree(ComplexExpression&& e
 
 /* Precondition: A single Group is present and is the top level operator */
 static ComplexExpression updateTablePositionInSuperAggregateExpr(ComplexExpression&& expr) {
-  assert(expr.getHead() == "Group"_);
+  assert(expr.getHead().getName() == "Group");
   ExpressionArguments outputDynamics;
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
-  outputDynamics.emplace_back(ComplexExpression(Symbol("Table"), {}, {}, {}));
+  outputDynamics.emplace_back(ComplexExpression("Table"_, {}, {}, {}));
   std::transform(std::make_move_iterator(next(dynamics.begin())),
                  std::make_move_iterator(dynamics.end()), std::back_inserter(outputDynamics),
                  [](auto&& arg) { return std::forward<decltype(arg)>(arg); });
@@ -163,30 +163,30 @@ static ComplexExpression updateTablePositionInSuperAggregateExpr(ComplexExpressi
 
 /* Precondition: A most one Group is present and, if so, is the top level operator */
 static ComplexExpression convertAggregatesToSuperAggregates(ComplexExpression&& expr) {
-  if(expr.getHead() != "Group"_)
+  if(expr.getHead().getName() != "Group")
     return std::move(expr);
   ExpressionArguments outputDynamics;
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
   std::transform(std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
                  std::back_inserter(outputDynamics), [](auto&& arg_) -> ComplexExpression {
                    auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
-                   if(arg.getHead() == "Count"_) {
+                   if(arg.getHead().getName() == "Count") {
                      auto [unused1, unused2, argDynamics, unused3] = std::move(arg).decompose();
-                     return {Symbol("Sum"), {}, std::move(argDynamics), {}};
+                     return {"Sum"_, {}, std::move(argDynamics), {}};
                    }
-                   if(arg.getHead() == "As"_) {
+                   if(arg.getHead().getName() == "As") {
                      ExpressionArguments outputAsDynamics;
                      auto [asHead, unused1, asDynamics, unused2] = std::move(arg).decompose();
                      assert(asDynamics.size() % 2 == 0);
                      auto it = std::make_move_iterator(asDynamics.begin());
                      while(it != std::make_move_iterator(asDynamics.end())) {
                        outputAsDynamics.push_back(std::move(*it++));
-                       if(std::get<ComplexExpression>(*it).getHead() == "Count"_) {
+                       if(std::get<ComplexExpression>(*it).getHead().getName() == "Count") {
                          ExpressionArguments aggColumnName;
                          aggColumnName.emplace_back(
                              Symbol(get<Symbol>(outputAsDynamics.back()).getName()));
                          outputAsDynamics.emplace_back(
-                             ComplexExpression(Symbol("Sum"), {}, std::move(aggColumnName), {}));
+                             ComplexExpression("Sum"_, {}, std::move(aggColumnName), {}));
                          ++it;
                        } else {
                          outputAsDynamics.push_back(std::move(*it++));
@@ -229,36 +229,21 @@ static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
   auto& dynamics = e.getDynamicArguments();
   ExpressionArguments copiedDynamics;
   copiedDynamics.reserve(dynamics.size());
-  std::for_each(dynamics.begin(), dynamics.end(), [&copiedDynamics](auto& dynamic) {
-    if(std::holds_alternative<ComplexExpression>(dynamic) &&
-       get<ComplexExpression>(dynamic).getHead() != "Table"_)
-      copiedDynamics.push_back(cloneExprAndMoveTables(get<ComplexExpression>(dynamic)));
-    else if(std::holds_alternative<ComplexExpression>(dynamic) &&
-            get<ComplexExpression>(dynamic).getHead() == "Table"_) {
-      auto& table = const_cast<ComplexExpression&>(get<ComplexExpression>(dynamic));
-      auto [tableHead, unused1_, tableDynamics, unused2_] = std::move(table).decompose();
-      ExpressionArguments copiedColumns;
-      std::transform(std::make_move_iterator(tableDynamics.begin()),
-                     std::make_move_iterator(tableDynamics.end()),
-                     std::back_inserter(copiedColumns),
-                     [](auto&& arg) { return std::forward<decltype(arg)>(arg); });
-      table = ComplexExpression("Table"_, {}, {}, {});
-      copiedDynamics.push_back(ComplexExpression("Table"_, {}, std::move(copiedColumns), {}));
-    } else {
-      std::visit(
-          [&copiedDynamics](auto& value) {
-            using T = std::decay_t<decltype(value)>;
-            if constexpr(std::is_same_v<T, bool> || std::is_same_v<T, int8_t> ||
-                         std::is_same_v<T, int32_t> || std::is_same_v<T, int64_t> ||
-                         std::is_same_v<T, float_t> || std::is_same_v<T, double_t> ||
-                         std::is_same_v<T, ::std::string> || std::is_same_v<T, Symbol>) {
-              copiedDynamics.push_back(value);
-            } else
-              throw std::runtime_error("Expression contains unknown type");
-          },
-          dynamic);
-    }
-  });
+  std::transform(dynamics.begin(), dynamics.end(), std::back_inserter(copiedDynamics),
+                 [](auto const& arg) {
+                   return std::visit(
+                       boss::utilities::overload(
+                           [](ComplexExpression const& expr) -> Expression {
+                             if(expr.getHead().getName() == "Table") {
+                               auto& table = const_cast<ComplexExpression&>(expr);
+                               auto [tableHead, unused1_, tableDynamics, unused2_] = std::move(table).decompose();
+                               return ComplexExpression("Table"_, {}, std::move(tableDynamics), {});
+                             }
+                             return cloneExprAndMoveTables(expr);
+                           },
+                           [](auto const& otherTypes) -> Expression { return otherTypes; }),
+                       arg);
+                 });
   return {e.getHead(), {}, std::move(copiedDynamics), {}};
 }
 
@@ -267,7 +252,7 @@ static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
 static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_t batchNum) {
   auto destDynamics = ExpressionArguments{};
   for(const auto& column : exprTable.getDynamicArguments()) {
-    auto& columnList = get<ComplexExpression>(column).getDynamicArguments().at(0);
+    auto const& columnList = get<ComplexExpression>(column).getDynamicArguments().at(0);
     auto&& span = const_cast<ExpressionSpanArgument&&>(
         std::move(get<ComplexExpression>(columnList).getSpanArguments().at(batchNum)));
     ExpressionSpanArguments spans{};
@@ -286,13 +271,13 @@ static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_
  * of all the tables present. */
 static ComplexExpression& getTableReference(ComplexExpression& e, // NOLINT
                                             ComplexExpression& _false) {
-  if(e.getHead() == "Table"_)
+  if(e.getHead().getName() == "Table")
     return e;
   auto [head, unused_, dynamics, spans] = std::move(e).decompose();
   for(auto& dynamic : dynamics) {
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
       auto& result = getTableReference(get<ComplexExpression>(dynamic), _false);
-      if(result.getHead() == "Table"_) {
+      if(result.getHead().getName() == "Table") {
         e = ComplexExpression(std::move(head), {}, std::move(dynamics), std::move(spans));
         return result;
       }
@@ -327,7 +312,7 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
   copiedDynamics.reserve(dynamics.size());
   std::for_each(dynamics.begin(), dynamics.end(), [&copiedDynamics](auto& dynamic) {
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
-      if(get<ComplexExpression>(dynamic).getHead() == "Table"_) {
+      if(get<ComplexExpression>(dynamic).getHead().getName() == "Table") {
         copiedDynamics.push_back(ComplexExpression("Table"_, {}, {}, {}));
       } else if(get<ComplexExpression>(dynamic).getHead() == "DateObject"_) {
         copiedDynamics.push_back(evaluateDateObject(get<ComplexExpression>(dynamic)));
@@ -356,7 +341,7 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
  * level. */
 static Expression vectorizedEvaluate(ComplexExpression&& expr,
                                      evaluteInternalFunction& pipelineEvaluate) {
-  bool pipelineBreakerPresent = expr.getHead() == "Group"_;
+  bool pipelineBreakerPresent = expr.getHead().getName() == "Group";
   auto& exprTable = getTableReference(expr);
   if(exprTable == utilities::_false)
     return pipelineEvaluate(std::move(expr));
@@ -490,7 +475,7 @@ void freeBOSSExpression(BOSSExpression* expression) {
 
 static Expression evaluateInternal(Expression&& e) {
   return std::move(e) | [](ComplexExpression&& e) -> Expression {
-    if(e.getHead() != "EvaluateInEngines"_)
+    if(e.getHead().getName() != "EvaluateInEngines")
       throw std::runtime_error("Expression does not start with 'EvaluateInEngines'");
     auto [head, unused_, dynamics, spans] = std::move(e).decompose();
     if(spans.size() != 1 || !std::holds_alternative<Span<int64_t>>(spans.at(0)) ||
