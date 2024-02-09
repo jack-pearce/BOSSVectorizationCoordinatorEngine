@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(BOSSVectorizationCoordinatorEngine)
 
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+
 if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
   set(CMAKE_POLICY_DEFAULT_CMP0135 NEW)

@@ -531,6 +531,6 @@ static Expression evaluate(Expression&& expr) {
   }
 }
 
-extern "C" BOSSExpression* evaluate(BOSSExpression* e) {
+extern "C" __attribute__((visibility("default"))) BOSSExpression* evaluate(BOSSExpression* e) {
   return new BOSSExpression{.delegate = evaluate(std::move(e->delegate))};
 }
