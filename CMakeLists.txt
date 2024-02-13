@@ -143,6 +143,7 @@ endif(MSVC)
 
 set(ImplementationFiles
         Source/BOSSVectorizationCoordinatorEngine.cpp
+        Source/config.cpp
         /home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
         # /repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
 )

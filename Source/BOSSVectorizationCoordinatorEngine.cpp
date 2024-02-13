@@ -2,14 +2,19 @@
 #include <Expression.hpp>
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 
 #include "/home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 // #include "/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
+#include "config.hpp"
+#include "memoryPool.hpp"
 
+// #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
 #define FIRST_ENGINE_IS_STORAGE_ENGINE
@@ -32,6 +37,8 @@ using boss::expressions::CloneReason;
 
 using evaluteFunction = BOSSExpression* (*)(BOSSExpression*);
 using evaluteInternalFunction = std::function<Expression(ComplexExpression&&)>;
+
+using adaptive::SelectOperatorStates;
 
 namespace utilities {
 auto _false = ComplexExpression("False"_, {}, {}, {});
@@ -73,31 +80,30 @@ static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
 } // namespace utilities
 #endif
 
-static ComplexExpression addIdToPredicates(ComplexExpression&& expr, int& predicateCount) {
+static ComplexExpression addIdToPredicatesAux(ComplexExpression&& expr, int& predicateCount) {
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
   ExpressionArguments outputDynamics;
   outputDynamics.reserve(dynamics.size());
-  std::transform(
-      std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
-      std::back_inserter(outputDynamics), [&predicateCount](auto&& arg_) -> ComplexExpression {
-        auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
-        if(arg.getHead().getName() == "And") {
-          return addIdToPredicates(std::move(arg), predicateCount);
-        }
-        auto [predHead, unused1, predDynamics, unused2] = std::move(arg).decompose();
-        ExpressionArguments idDynamics;
-        idDynamics.emplace_back(predicateCount++);
-        auto idExpr = ComplexExpression("PredicateID"_, {}, std::move(idDynamics), {});
-        predDynamics.emplace_back(std::move(idExpr));
-        return {std::move(predHead), {}, std::move(predDynamics), {}};
-      });
+  std::transform(std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
+                 std::back_inserter(outputDynamics),
+                 [&predicateCount](auto&& arg_) -> ComplexExpression {
+                   auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
+                   if(arg.getHead().getName() == "And") {
+                     return addIdToPredicatesAux(std::move(arg), predicateCount);
+                   }
+                   auto [predHead, unused1, predDynamics, unused2] = std::move(arg).decompose();
+                   ExpressionArguments idDynamics;
+                   idDynamics.emplace_back(predicateCount++);
+                   auto idExpr = ComplexExpression("PredicateID"_, {}, std::move(idDynamics), {});
+                   predDynamics.emplace_back(std::move(idExpr));
+                   return {std::move(predHead), {}, std::move(predDynamics), {}};
+                 });
   return {std::move(head), {}, std::move(outputDynamics), {}};
 }
 
 /* Precondition: Currently adds an ID to all 'Where' predicates, therefore assumes that
  * only 'Select' can have 'Where' predicates. */
-static ComplexExpression prepareExpressionForHazardAdaptiveEngineAux(ComplexExpression&& expr,
-                                                                     int& predicateCount) {
+static ComplexExpression addIdToPredicates(ComplexExpression&& expr, int& predicateCount) {
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
   ExpressionArguments outputDynamics;
   outputDynamics.reserve(dynamics.size());
@@ -106,10 +112,9 @@ static ComplexExpression prepareExpressionForHazardAdaptiveEngineAux(ComplexExpr
                    if(std::holds_alternative<ComplexExpression>(arg_)) {
                      auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
                      if(arg.getHead().getName() == "Where") {
-                       return addIdToPredicates(std::move(arg), predicateCount);
+                       return addIdToPredicatesAux(std::move(arg), predicateCount);
                      }
-                     return prepareExpressionForHazardAdaptiveEngineAux(std::move(arg),
-                                                                        predicateCount);
+                     return addIdToPredicates(std::move(arg), predicateCount);
                    } else {
                      return arg_;
                    }
@@ -117,34 +122,36 @@ static ComplexExpression prepareExpressionForHazardAdaptiveEngineAux(ComplexExpr
   return {std::move(head), {}, std::move(outputDynamics), {}};
 }
 
-static ComplexExpression prepareExpressionForHazardAdaptiveEngine(ComplexExpression&& expr) {
-  int predicateCount = 0;
-  expr = prepareExpressionForHazardAdaptiveEngineAux(std::move(expr), predicateCount);
-#if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
-  std::cout << "Identified " << predicateCount << " Select operators" << std::endl;
-#endif
-  if(predicateCount > 0) {
-    auto* selectOperators = new adaptive::SelectOperatorStates(predicateCount);
-    ExpressionArguments statsArgs;
-    statsArgs.emplace_back(reinterpret_cast<int64_t>(selectOperators));
-    auto stats = ComplexExpression("Stats"_, {}, std::move(statsArgs), {});
-
-    ExpressionArguments letArgs;
-    letArgs.emplace_back(std::move(expr));
-    letArgs.emplace_back(std::move(stats));
-    return {"Let"_, {}, std::move(letArgs), {}};
-  } else {
-    return expr;
-  }
+static ComplexExpression addParallelInformation(ComplexExpression&& expr, int vectorizedDOP) {
+  auto letArgs = ExpressionArguments(std::move(expr));
+  letArgs.emplace_back(ComplexExpression("Parallel"_, {}, ExpressionArguments(vectorizedDOP), {}));
+  return {"Let"_, {}, std::move(letArgs), {}};
 }
 
-static ComplexExpression stripRootLetFromExpressionAndFree(ComplexExpression&& expr) {
-  if(expr.getHead().getName() == "Let") {
+static ComplexExpression addStatsInformation(ComplexExpression&& expr,
+                                             SelectOperatorStates* statesPtr) {
+  auto letArgs = ExpressionArguments(std::move(expr));
+  letArgs.emplace_back(ComplexExpression(
+      "Stats"_, {}, ExpressionArguments(reinterpret_cast<int64_t>(statesPtr)), {}));
+  return {"Let"_, {}, std::move(letArgs), {}};
+}
+
+class StatsRaiiWrapper {
+public:
+  explicit StatsRaiiWrapper(int predicateCount)
+      : selectOperatorStates(std::make_unique<SelectOperatorStates>(predicateCount)) {}
+  [[nodiscard]] SelectOperatorStates* getStates() const { return selectOperatorStates.get(); }
+  StatsRaiiWrapper(const StatsRaiiWrapper&) = delete;
+  StatsRaiiWrapper& operator=(const StatsRaiiWrapper&) = delete;
+
+private:
+  std::unique_ptr<SelectOperatorStates> selectOperatorStates;
+};
+
+static ComplexExpression stripRootLetsFromExpression(ComplexExpression&& expr) {
+  while(expr.getHead().getName() == "Let") {
     auto [unused1, unused2, dynamics, unused3] = std::move(expr).decompose();
-    auto selectOperatorStates = reinterpret_cast<adaptive::SelectOperatorStates*>(
-        get<int64_t>(get<ComplexExpression>(dynamics.at(1)).getDynamicArguments().at(0)));
-    delete selectOperatorStates;
-    return std::move(get<ComplexExpression>(dynamics.at(0)));
+    expr = get<ComplexExpression>(std::move(dynamics.at(0)));
   }
   return std::move(expr);
 }
@@ -236,7 +243,8 @@ static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
                            [](ComplexExpression const& expr) -> Expression {
                              if(expr.getHead().getName() == "Table") {
                                auto& table = const_cast<ComplexExpression&>(expr);
-                               auto [tableHead, unused1_, tableDynamics, unused2_] = std::move(table).decompose();
+                               auto [tableHead, unused1_, tableDynamics, unused2_] =
+                                   std::move(table).decompose();
                                return ComplexExpression("Table"_, {}, std::move(tableDynamics), {});
                              }
                              return cloneExprAndMoveTables(expr);
@@ -339,12 +347,12 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
 
 /* Precondition: There is at most one pipeline breaker which can only be a Group which is at the top
  * level. */
-static Expression vectorizedEvaluate(ComplexExpression&& expr,
-                                     evaluteInternalFunction& pipelineEvaluate) {
-  bool pipelineBreakerPresent = expr.getHead().getName() == "Group";
-  auto& exprTable = getTableReference(expr);
-  if(exprTable == utilities::_false)
-    return pipelineEvaluate(std::move(expr));
+static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
+                                           ComplexExpression& exprTable,
+                                           bool pipelineBreakerPresent,
+                                           evaluteInternalFunction& pipelineEvaluate,
+                                           int startBatch, int numBatches, int vectorizedDOP,
+                                           ExpressionArguments& outputVector, int outputIndex) {
   auto subExprMaster = generateSubExpressionClone(expr);
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 #ifdef DEBUG_MODE_VERBOSE
@@ -355,7 +363,17 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
             << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
             << std::endl;
 #endif
-  subExprMaster = prepareExpressionForHazardAdaptiveEngine(std::move(subExprMaster));
+  subExprMaster = addParallelInformation(std::move(subExprMaster), vectorizedDOP);
+  int predicateCount = 0;
+  subExprMaster = addIdToPredicates(std::move(subExprMaster), predicateCount);
+#if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
+  std::cout << "Identified " << predicateCount << " predicates" << std::endl;
+#endif
+  std::optional<StatsRaiiWrapper> stats =
+      predicateCount > 0 ? std::make_optional<StatsRaiiWrapper>(predicateCount) : std::nullopt;
+  if(stats.has_value()) {
+    subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
+  }
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "SubExprMaster after preparing:  " << subExprMaster << std::endl;
 #endif
@@ -366,13 +384,6 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
 #endif
 #endif
   auto& subExprMasterTable = getTableReference(subExprMaster);
-  auto numBatches =
-      get<ComplexExpression>(
-          get<ComplexExpression>(exprTable.getDynamicArguments().at(0)).getDynamicArguments().at(0))
-          .getSpanArguments()
-          .size();
-  if(numBatches == 0)
-    return pipelineEvaluate(std::move(expr));
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "Expr:               " << expr << std::endl;
   std::cout << "ExprTable:          " << exprTable << std::endl;
@@ -395,7 +406,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
   std::cout << "NumBatches:         " << numBatches << std::endl;
 #endif
   ExpressionArguments results;
-  for(size_t batchNum = 0; batchNum < numBatches; batchNum++) {
+  for(int batchNum = startBatch; batchNum < startBatch + numBatches; ++batchNum) {
     subExprMasterTable = moveSpansToNewTable(exprTable, batchNum);
     auto subExpr = cloneExprAndMoveTables(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
@@ -422,7 +433,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
 #endif
   auto result = unionTables(std::move(results));
   if(pipelineBreakerPresent) {
-    subExprMaster = stripRootLetFromExpressionAndFree(std::move(subExprMaster));
+    subExprMaster = stripRootLetsFromExpression(std::move(subExprMaster));
     subExprMaster = updateTablePositionInSuperAggregateExpr(std::move(subExprMaster));
     subExprMaster = convertAggregatesToSuperAggregates(std::move(subExprMaster));
     auto& finalExprTable = getTableReference(subExprMaster);
@@ -444,9 +455,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
               << utilities::injectDebugInfoToSpans(finalResult.clone(CloneReason::FOR_TESTING))
               << std::endl;
 #endif
-    return finalResult;
+    outputVector[outputIndex] = std::move(finalResult);
+    return;
 #else
-    return pipelineEvaluate(std::move(subExprMaster));
+    outputVector[outputIndex] = pipelineEvaluate(std::move(subExprMaster));
+    return;
 #endif
   }
 #if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
@@ -458,6 +471,77 @@ static Expression vectorizedEvaluate(ComplexExpression&& expr,
             << std::endl;
 #endif
 #endif
+  outputVector[outputIndex] = std::move(result);
+}
+
+static Expression vectorizedEvaluate(ComplexExpression&& e,
+                                     evaluteInternalFunction& pipelineEvaluate) {
+  auto expr = std::move(e);
+  bool pipelineBreakerPresent = expr.getHead().getName() == "Group";
+  auto& exprTable = getTableReference(expr);
+  if(exprTable == utilities::_false)
+    return pipelineEvaluate(std::move(expr));
+  auto numBatches = static_cast<int>(
+      get<ComplexExpression>(
+          get<ComplexExpression>(exprTable.getDynamicArguments().at(0)).getDynamicArguments().at(0))
+          .getSpanArguments()
+          .size());
+#ifdef DEBUG_MULTI_THREAD
+  std::cout << "Number of batches: " << numBatches << std::endl;
+#endif
+  if(numBatches == 0)
+    return pipelineEvaluate(std::move(expr));
+
+  int dop = std::min(numBatches, vectorization::config::maxVectorizedDOP);
+  ExpressionArguments results;
+  results.resize(dop);
+#ifdef DEBUG_MULTI_THREAD
+  std::cout << "Using " << dop << " degrees of parallelism" << std::endl;
+#endif
+  if(dop == 1) {
+    vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, pipelineEvaluate, 0,
+                                   numBatches, 1, results, 0);
+  } else {
+    ThreadPool::getInstance();
+
+    int batchesPerThread = numBatches / dop;
+    int startBatchNum = 0;
+    for(auto i = 0; i < dop - 1; ++i) {
+      ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent,
+                                         &pipelineEvaluate, startBatchNum, batchesPerThread, dop,
+                                         &results, i]() {
+        vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, pipelineEvaluate,
+                                       startBatchNum, batchesPerThread, dop, results, i);
+      });
+      startBatchNum += batchesPerThread;
+    }
+    batchesPerThread = numBatches - startBatchNum;
+    ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent, &pipelineEvaluate,
+                                       startBatchNum, batchesPerThread, dop, &results,
+                                       i = dop - 1]() {
+      vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, pipelineEvaluate,
+                                     startBatchNum, batchesPerThread, dop, results, i);
+    });
+
+    ThreadPool::getInstance().waitUntilComplete(dop);
+  }
+  auto result = unionTables(std::move(results));
+#ifdef DEBUG_MODE_VERBOSE
+  std::cout << "Combined result:    " << result << std::endl;
+#endif
+#ifdef DEBUG_MODE
+  std::cout << "Combined result:    "
+            << utilities::injectDebugInfoToSpans(result.clone(CloneReason::FOR_TESTING))
+            << std::endl;
+#endif
+
+  if(pipelineBreakerPresent) {
+    expr = updateTablePositionInSuperAggregateExpr(std::move(expr));
+    expr = convertAggregatesToSuperAggregates(std::move(expr));
+    auto& finalExprTable = getTableReference(expr);
+    finalExprTable = std::move(result);
+    return pipelineEvaluate(std::move(expr));
+  }
   return result;
 }
 
