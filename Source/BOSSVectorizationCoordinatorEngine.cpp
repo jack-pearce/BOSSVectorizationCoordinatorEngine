@@ -214,15 +214,19 @@ static ComplexExpression unionTables(ExpressionArguments&& tables) {
     auto [unused1_, unused2_, columns, unused3_] =
         get<ComplexExpression>(std::move(*it++)).decompose();
     for(auto&& column : columns) {
-      auto&& span = const_cast<ExpressionSpanArgument&&>(std::move(
-          get<ComplexExpression>(get<ComplexExpression>(column).getDynamicArguments().at(0))
-              .getSpanArguments()
-              .at(0)));
       auto& spans = const_cast<ExpressionSpanArguments&>(
           get<ComplexExpression>(
               get<ComplexExpression>(*resultColumnsIt).getDynamicArguments().at(0))
               .getSpanArguments());
-      spans.push_back(std::move(span));
+      auto numSpans = get<ComplexExpression>(get<ComplexExpression>(column).getDynamicArguments().at(0))
+                         .getSpanArguments().size();
+      for (size_t i = 0; i < numSpans; ++i) {
+        auto&& span = const_cast<ExpressionSpanArgument&&>(std::move(
+            get<ComplexExpression>(get<ComplexExpression>(column).getDynamicArguments().at(0))
+                .getSpanArguments()
+                .at(i)));
+        spans.push_back(std::move(span));
+      }
       resultColumnsIt++;
     }
   }

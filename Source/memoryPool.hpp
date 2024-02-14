@@ -2,10 +2,10 @@
 #define BOSSVECTORIZATIONCOORDINATORENGINE_MEMORYPOOL_H
 
 #include "config.hpp"
-
 #include <condition_variable>
 #include <functional>
 #include <iostream>
+#include <numa.h>
 #include <pthread.h>
 #include <queue>
 
@@ -37,7 +37,13 @@ public:
   }
 
 private:
-  explicit ThreadPool(int numThreads) : stop(false), tasksCompletedCount(0) {
+  explicit ThreadPool(int numThreads) : stop(false), tasksCompletedCount(0), numaMachine(false) {
+    if(numa_available() > 0) {
+      numaMachine = true;
+#ifdef MEMORY_INFO
+      std::cout << "Running on NUMA machine\n";
+#endif
+    }
 #ifdef MEMORY_INFO
     std::cout << "Constructing " << numThreads << " worker threads for thread pool\n";
 #endif
@@ -60,6 +66,8 @@ private:
   }
 
   static void* workerThread(void* arg) {
+    auto* pool = &getInstance();
+
     auto cpuCore = static_cast<int>(reinterpret_cast<std::intptr_t>(arg));
     cpu_set_t cpuSet;
     CPU_ZERO(&cpuSet);
@@ -71,7 +79,17 @@ private:
     std::cout << "Started worker thread running on cpu core " << cpuCore << std::endl;
 #endif
 
-    auto* pool = &getInstance();
+    if(pool->numaMachine) {
+      int numaNode = numa_node_of_cpu(cpuCore);
+      if(numa_run_on_node(numaNode) < 0) {
+        std::cerr << "Error setting affinity of thread " << cpuCore << " to NUMA node " << numaNode
+                  << std::endl;
+      }
+#ifdef MEMORY_INFO
+      std::cout << "Pinned thread " << cpuCore << " to numa node " << numaNode << std::endl;
+#endif
+    }
+
     while(true) {
       std::function<void()> task;
       {
@@ -100,6 +118,7 @@ private:
   std::condition_variable wait_cv;
   bool stop;
   uint32_t tasksCompletedCount;
+  bool numaMachine;
 };
 
 #endif // BOSSVECTORIZATIONCOORDINATORENGINE_MEMORYPOOL_H

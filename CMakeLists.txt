@@ -154,6 +154,9 @@ target_include_directories(BOSSVectorizationCoordinatorEngine SYSTEM PUBLIC ${BO
 target_link_directories(BOSSVectorizationCoordinatorEngine PUBLIC ${BOSSVectorizationCoordinatorEngine_BINARY_DIR}/deps/lib)
 add_dependencies(BOSSVectorizationCoordinatorEngine BOSS)
 
+find_library(NUMA_LIBRARY numa)
+target_link_libraries(BOSSVectorizationCoordinatorEngine ${NUMA_LIBRARY})
+
 set_target_properties(BOSSVectorizationCoordinatorEngine PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
 install(TARGETS BOSSVectorizationCoordinatorEngine LIBRARY DESTINATION lib)
 
