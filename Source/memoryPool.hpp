@@ -38,7 +38,7 @@ public:
 
 private:
   explicit ThreadPool(int numThreads) : stop(false), tasksCompletedCount(0), numaMachine(false) {
-    if(numa_available() > 0) {
+    if(numa_available() == 0 && numa_max_node() > 0) {
       numaMachine = true;
 #ifdef MEMORY_INFO
       std::cout << "Running on NUMA machine\n";
