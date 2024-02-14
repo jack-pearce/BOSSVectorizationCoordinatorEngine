@@ -504,9 +504,16 @@ static Expression vectorizedEvaluate(ComplexExpression&& e,
   } else {
     ThreadPool::getInstance();
 
-    int batchesPerThread = numBatches / dop;
+    int baselineBatchesPerThread = numBatches / dop;
+    int remainingBatches = numBatches % dop;
     int startBatchNum = 0;
+    int batchesPerThread;
     for(auto i = 0; i < dop - 1; ++i) {
+      batchesPerThread = baselineBatchesPerThread + (i < remainingBatches);
+#ifdef DEBUG_MULTI_THREAD
+      std::cout << "Thread " << i << " processing " << batchesPerThread
+                << " batches starting from batch " << startBatchNum << std::endl;
+#endif
       ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent,
                                          &pipelineEvaluate, startBatchNum, batchesPerThread, dop,
                                          &results, i]() {
@@ -516,6 +523,10 @@ static Expression vectorizedEvaluate(ComplexExpression&& e,
       startBatchNum += batchesPerThread;
     }
     batchesPerThread = numBatches - startBatchNum;
+#ifdef DEBUG_MULTI_THREAD
+    std::cout << "Thread " << (dop - 1) << " processing " << batchesPerThread
+              << " batches starting from batch " << startBatchNum << std::endl;
+#endif
     ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent, &pipelineEvaluate,
                                        startBatchNum, batchesPerThread, dop, &results,
                                        i = dop - 1]() {
