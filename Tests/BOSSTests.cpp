@@ -129,8 +129,7 @@ TEST_CASE("Delegate bootstrapping - select multiple spans", "[vectorization-engi
   SECTION("Delegate bootstrapping - select multiple spans 1") {
     auto table = "Table"_("key"_(createTwoSpansIntStartingFrom(0)),
                           "payload"_(createTwoSpansIntStartingFrom(4)));
-    auto result = eval("Select"_(std::move(table),
-                                 "Where"_("Greater"_("key"_, 0))));
+    auto result = eval("Select"_(std::move(table), "Where"_("Greater"_("key"_, 0))));
 
     CHECK(result == "Table"_("key"_("List"_(1, 2, 3)), "payload"_("List"_(5, 6, 7))));
   }
@@ -256,20 +255,106 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
   }
 
   SECTION("Q6") {
-    auto output = eval(
-        "Group"_("Project"_("Select"_("Project"_(lineitem.clone(CloneReason::FOR_TESTING),
-                                                 "As"_("L_QUANTITY"_, "L_QUANTITY"_, "L_DISCOUNT"_,
-                                                       "L_DISCOUNT"_, "L_SHIPDATE"_, "L_SHIPDATE"_,
-                                                       "L_EXTENDEDPRICE"_, "L_EXTENDEDPRICE"_)),
-                                      "Where"_("And"_("Greater"_(24, "L_QUANTITY"_),      // NOLINT
-                                                      "Greater"_("L_DISCOUNT"_, 0.0499),  // NOLINT
-                                                      "Greater"_(0.07001, "L_DISCOUNT"_), // NOLINT
-                                                      "Greater"_("DateObject"_("1995-12-31"), "L_SHIPDATE"_),
-                                                      "Greater"_("L_SHIPDATE"_, "DateObject"_("1993-12-31"))))),
-                            "As"_("revenue"_, "Times"_("L_EXTENDEDPRICE"_, "L_DISCOUNT"_))),
-                 "Sum"_("revenue"_)));
+    auto output = eval("Group"_(
+        "Project"_(
+            "Select"_("Project"_(lineitem.clone(CloneReason::FOR_TESTING),
+                                 "As"_("L_QUANTITY"_, "L_QUANTITY"_, "L_DISCOUNT"_, "L_DISCOUNT"_,
+                                       "L_SHIPDATE"_, "L_SHIPDATE"_, "L_EXTENDEDPRICE"_,
+                                       "L_EXTENDEDPRICE"_)),
+                      "Where"_("And"_("Greater"_(24, "L_QUANTITY"_),      // NOLINT
+                                      "Greater"_("L_DISCOUNT"_, 0.0499),  // NOLINT
+                                      "Greater"_(0.07001, "L_DISCOUNT"_), // NOLINT
+                                      "Greater"_("DateObject"_("1995-12-31"), "L_SHIPDATE"_),
+                                      "Greater"_("L_SHIPDATE"_, "DateObject"_("1993-12-31"))))),
+            "As"_("revenue"_, "Times"_("L_EXTENDEDPRICE"_, "L_DISCOUNT"_))),
+        "Sum"_("revenue"_)));
 
     CHECK(output == "Table"_("revenue"_("List"_(34850.16 * 0.05 + 25284.00 * 0.06)))); // NOLINT
+  }
+}
+
+TEST_CASE("Delegate bootstrapping - more complex queries (without Join)",
+          "[vectorization-engine]") {
+  auto engine = boss::engines::BootstrapEngine();
+  REQUIRE(librariesToTest.size() >= 2);
+  boss::ExpressionArguments libsArg;
+  for(auto it = librariesToTest.begin() + 1; it != librariesToTest.end(); ++it)
+    libsArg.emplace_back(*it);
+  auto libsExpr = boss::ComplexExpression("List"_, std::move(libsArg));
+  auto eval = [&](boss::Expression&& expr) mutable {
+    return engine.evaluate(
+        "DelegateBootstrapping"_(librariesToTest[0], std::move(libsExpr), std::move(expr)));
+  };
+
+  auto lineitem =
+      "Table"_("L_ORDERKEY"_(createTwoTwoNumIntSpans(1, 1, 2, 3)),              // NOLINT
+               "L_PARTKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
+               "L_SUPPKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
+               "L_RETURNFLAG"_(createTwoTwoStrStringSpans("N", "N", "A", "A")), // NOLINT
+               "L_LINESTATUS"_(createTwoTwoStrStringSpans("O", "O", "F", "F")), // NOLINT
+               "L_QUANTITY"_(createTwoTwoNumIntSpans(17, 21, 8, 5)),            // NOLINT
+               "L_EXTENDEDPRICE"_(
+                   createTwoTwoNumFloatSpans(17954.55, 34850.16, 7712.48, 25284.00)), // NOLINT
+               "L_DISCOUNT"_(createTwoTwoNumFloatSpans(0.10, 0.05, 0.06, 0.06)),      // NOLINT
+               "L_TAX"_(createTwoTwoNumFloatSpans(0.02, 0.06, 0.02, 0.06)),           // NOLINT
+               "L_SHIPDATE"_(createTwoTwoNumIntSpans(8400, 9130, 9861, 9130)));       // NOLINT
+
+  SECTION("Multiple selects and groups") {
+    auto output = eval("Select"_(
+        "Group"_(
+            "Select"_(
+                "Group"_("Select"_("Project"_(lineitem.clone(CloneReason::FOR_TESTING),
+                                              "As"_("L_QUANTITY"_, "L_QUANTITY"_, "L_DISCOUNT"_,
+                                                    "L_DISCOUNT"_, "L_SHIPDATE"_, "L_SHIPDATE"_,
+                                                    "L_EXTENDEDPRICE"_, "L_EXTENDEDPRICE"_)),
+                                   "Where"_("And"_("Greater"_(24, "L_QUANTITY"_), // NOLINT
+                                                   "Greater"_("L_DISCOUNT"_, 0.052)))),
+                         "By"_("L_QUANTITY"_), "Sum"_("L_EXTENDEDPRICE"_)),
+                "Where"_("Greater"_("L_QUANTITY"_, 6))),
+            "As"_("count"_, "Count"_("L_QUANTITY"_))),
+        "Where"_("Greater"_("count"_, 1))));
+
+    CHECK(output == "Table"_("count"_("List"_(2)))); // NOLINT
+  }
+}
+
+auto createTwoSpansInt = [](intType n1, intType n2) {
+  using SpanArguments = boss::expressions::ExpressionSpanArguments;
+  std::vector<intType> v1 = {n1, n1 + 1, n1 + 2};
+  std::vector<intType> v2 = {n2, n2 + 1, n2 + 2};
+  auto s1 = boss::Span<intType>(std::move(v1));
+  auto s2 = boss::Span<intType>(std::move(v2));
+  SpanArguments args;
+  args.emplace_back(std::move(s1));
+  args.emplace_back(std::move(s2));
+  return boss::expressions::ComplexExpression("List"_, {}, {}, std::move(args));
+};
+
+TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
+  auto engine = boss::engines::BootstrapEngine();
+  REQUIRE(librariesToTest.size() >= 2);
+  boss::ExpressionArguments libsArg;
+  for(auto it = librariesToTest.begin() + 1; it != librariesToTest.end(); ++it)
+    libsArg.emplace_back(*it);
+  auto libsExpr = boss::ComplexExpression("List"_, std::move(libsArg));
+  auto eval = [&](boss::Expression&& expr) mutable {
+    return engine.evaluate(
+        "DelegateBootstrapping"_(librariesToTest[0], std::move(libsExpr), std::move(expr)));
+  };
+
+  SECTION("Simple join 1") {
+    auto intTable1 = "Table"_("L_key"_(createTwoSpansInt(1, 100)),
+                              "L_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
+                              "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto result = eval("Join"_(std::move(intTable1), std::move(intTable2),
+                               "Where"_("Equal"_("L_key"_, "O_key"_))));
+
+    CHECK(result == "Join"_("RadixPartition"_("Table"_("L_value"_("List"_(1, 2, 3, 4, 5, 6))),
+                                              "L_key"_(1, 2, 3), 0, 1, 2),
+                            "RadixPartition"_("Table"_("O_value"_("List"_(1, 2, 3, 4, 5, 6))),
+                                              "O_key"_(1, 2, 3), 3, 4, 5),
+                            "Where"_("Equal"_("L_key"_, "O_key"_))));
   }
 }
 
