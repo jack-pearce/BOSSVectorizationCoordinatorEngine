@@ -357,36 +357,39 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
                                            ComplexExpression& exprTable, bool groupPresent,
                                            evaluteInternalFunction& evaluateFunc, int startBatch,
                                            int numBatches, int vectorizedDOP,
-                                           ExpressionArguments& outputVector, int outputIndex) {
+                                           ExpressionArguments& outputVector, int outputIndex,
+                                           bool hazardAdaptiveEngineInPipeline) {
   auto subExprMaster = generateSubExpressionClone(expr);
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
+  if(hazardAdaptiveEngineInPipeline) {
 #ifdef DEBUG_MODE_VERBOSE
-  std::cout << "SubExprMaster before preparing: " << subExprMaster << std::endl;
+    std::cout << "SubExprMaster before preparing: " << subExprMaster << std::endl;
 #endif
 #ifdef DEBUG_MODE
-  std::cout << "SubExprMaster before preparing: "
-            << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
-            << std::endl;
+    std::cout << "SubExprMaster before preparing: "
+              << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
+              << std::endl;
 #endif
-  subExprMaster = addParallelInformation(std::move(subExprMaster), vectorizedDOP);
-  int predicateCount = 0;
-  subExprMaster = addIdToPredicates(std::move(subExprMaster), predicateCount);
+    subExprMaster = addParallelInformation(std::move(subExprMaster), vectorizedDOP);
+    int predicateCount = 0;
+    subExprMaster = addIdToPredicates(std::move(subExprMaster), predicateCount);
 #if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
-  std::cout << "Identified " << predicateCount << " predicates" << std::endl;
+    std::cout << "Identified " << predicateCount << " predicates" << std::endl;
 #endif
-  std::optional<StatsRaiiWrapper> stats =
-      predicateCount > 0 ? std::make_optional<StatsRaiiWrapper>(predicateCount) : std::nullopt;
-  if(stats.has_value()) {
-    subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
-  }
+    std::optional<StatsRaiiWrapper> stats =
+        predicateCount > 0 ? std::make_optional<StatsRaiiWrapper>(predicateCount) : std::nullopt;
+    if(stats.has_value()) {
+      subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
+    }
 #ifdef DEBUG_MODE_VERBOSE
-  std::cout << "SubExprMaster after preparing:  " << subExprMaster << std::endl;
+    std::cout << "SubExprMaster after preparing:  " << subExprMaster << std::endl;
 #endif
 #ifdef DEBUG_MODE
-  std::cout << "SubExprMaster after preparing:  "
-            << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
-            << std::endl;
+    std::cout << "SubExprMaster after preparing:  "
+              << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
+              << std::endl;
 #endif
+  }
 #endif
   auto& subExprMasterTable = getTableReference(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
@@ -479,7 +482,8 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
   outputVector[outputIndex] = std::move(result);
 }
 
-static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc) {
+static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc,
+                                     bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
   bool groupPresent = expr.getHead().getName() == "Group";
   auto& exprTable = getTableReference(expr);
@@ -504,7 +508,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
 #endif
   if(dop == 1) {
     vectorizedEvaluateSingleThread(expr, exprTable, groupPresent, evaluateFunc, 0, numBatches, 1,
-                                   results, 0);
+                                   results, 0, hazardAdaptiveEngineInPipeline);
   } else {
     ThreadPool::getInstance();
 
@@ -519,9 +523,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
                 << " batches starting from batch " << startBatchNum << std::endl;
 #endif
       ThreadPool::getInstance().enqueue([&expr, &exprTable, groupPresent, &evaluateFunc,
-                                         startBatchNum, batchesPerThread, dop, &results, i]() {
+                                         startBatchNum, batchesPerThread, dop, &results, i,
+                                         hazardAdaptiveEngineInPipeline]() {
         vectorizedEvaluateSingleThread(expr, exprTable, groupPresent, evaluateFunc, startBatchNum,
-                                       batchesPerThread, dop, results, i);
+                                       batchesPerThread, dop, results, i,
+                                       hazardAdaptiveEngineInPipeline);
       });
       startBatchNum += batchesPerThread;
     }
@@ -531,10 +537,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
               << " batches starting from batch " << startBatchNum << std::endl;
 #endif
     ThreadPool::getInstance().enqueue([&expr, &exprTable, groupPresent, &evaluateFunc,
-                                       startBatchNum, batchesPerThread, dop, &results,
-                                       i = dop - 1]() {
+                                       startBatchNum, batchesPerThread, dop, &results, i = dop - 1,
+                                       hazardAdaptiveEngineInPipeline]() {
       vectorizedEvaluateSingleThread(expr, exprTable, groupPresent, evaluateFunc, startBatchNum,
-                                     batchesPerThread, dop, results, i);
+                                     batchesPerThread, dop, results, i,
+                                     hazardAdaptiveEngineInPipeline);
     });
 
     ThreadPool::getInstance().waitUntilComplete(dop);
@@ -613,10 +620,10 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
             }
             if(lastOperationWasJoin) { // Contained a join so omit first engine
               return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        pipelineEvaluateExceptFirstEngine);
+                                        pipelineEvaluateExceptFirstEngine, false);
             } else { // Evaluate remaining pipeline-able expression
               return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        wholePipelineEvaluate);
+                                        wholePipelineEvaluate, true);
             }
           });
     }
@@ -629,17 +636,17 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
       bool lastOperationWasJoinTmp = lastOperationWasJoin;
       lastOperationWasJoin = false;
       if(lastOperationWasJoinTmp) {
-        return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+        return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine, false);
       } else {
-        return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate);
+        return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate, true);
       }
     }
     if(!finalEvaluateRequired) { // Final evaluation required if root was not a Group
       return std::move(unevaluated);
     } else if(lastOperationWasJoin) {
-      return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+      return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine, false);
     } else {
-      return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate);
+      return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate, true);
     }
   }
   return std::move(e); // Nothing to evaluate
