@@ -351,9 +351,9 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
                                "Where"_("Equal"_("L_key"_, "O_key"_))));
 
     CHECK(result == "Join"_("RadixPartition"_("Table"_("L_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "L_key"_(1, 2, 3), 0, 1, 2),
+                                              "L_key"_("List"_(1, 2, 3)), 0, 1, 2),
                             "RadixPartition"_("Table"_("O_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "O_key"_(1, 2, 3), 3, 4, 5),
+                                              "O_key"_("List"_(1, 2, 3)), 3, 4, 5),
                             "Where"_("Equal"_("L_key"_, "O_key"_))));
   }
 }

@@ -44,8 +44,8 @@ namespace utilities {
 auto _false = ComplexExpression("False"_, {}, {}, {});
 }
 
-static ComplexExpression& getTableReference(ComplexExpression& e,
-                                            ComplexExpression& _false = utilities::_false);
+static ComplexExpression& getTableOrJoinReference(ComplexExpression& e,
+                                                  ComplexExpression& _false = utilities::_false);
 
 #ifdef DEBUG_MODE
 namespace utilities {
@@ -79,6 +79,43 @@ static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
 }
 } // namespace utilities
 #endif
+
+static boss::ComplexExpression shallowCopy(boss::ComplexExpression const& e) {
+  auto const& head = e.getHead();
+  auto const& dynamics = e.getDynamicArguments();
+  auto const& spans = e.getSpanArguments();
+  boss::ExpressionArguments dynamicsCopy;
+  std::transform(dynamics.begin(), dynamics.end(), std::back_inserter(dynamicsCopy),
+                 [](auto const& arg) {
+                   return std::visit(
+                       boss::utilities::overload(
+                           [&](boss::ComplexExpression const& expr) -> boss::Expression {
+                             return shallowCopy(expr);
+                           },
+                           [](auto const& otherTypes) -> boss::Expression { return otherTypes; }),
+                       arg);
+                 });
+  boss::expressions::ExpressionSpanArguments spansCopy;
+  std::transform(spans.begin(), spans.end(), std::back_inserter(spansCopy), [](auto const& span) {
+    return std::visit(
+        [](auto const& typedSpan) -> boss::expressions::ExpressionSpanArgument {
+          // just do a shallow copy of the span
+          // the storage's span keeps the ownership
+          // (since the storage will be alive until the query finishes)
+          using SpanType = std::decay_t<decltype(typedSpan)>;
+          using T = std::remove_const_t<typename SpanType::element_type>;
+          if constexpr(std::is_same_v<T, bool>) {
+            return SpanType(typedSpan.begin(), typedSpan.size(), []() {});
+          } else {
+            // force non-const value for now (otherwise expressions cannot be moved)
+            auto* ptr = const_cast<T*>(typedSpan.begin()); // NOLINT
+            return boss::Span<T>(ptr, typedSpan.size(), []() {});
+          }
+        },
+        span);
+  });
+  return {head, {}, std::move(dynamicsCopy), std::move(spansCopy)};
+}
 
 static ComplexExpression addIdToPredicatesAux(ComplexExpression&& expr, int& predicateCount) {
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
@@ -261,8 +298,6 @@ static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
   return {e.getHead(), {}, std::move(copiedDynamics), {}};
 }
 
-/* Precondition: There is only a single table in the expression. Could update this to work on a list
- * of tables. */
 static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_t batchNum) {
   auto destDynamics = ExpressionArguments{};
   for(const auto& column : exprTable.getDynamicArguments()) {
@@ -281,16 +316,60 @@ static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_
   return {"Table"_, {}, std::move(destDynamics), {}};
 }
 
-/* Precondition: There is only a single table in the expression. Could update this to return a list
- * of all the tables present. */
-static ComplexExpression& getTableReference(ComplexExpression& e, // NOLINT
-                                            ComplexExpression& _false) {
-  if(e.getHead().getName() == "Table")
+static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable, size_t batchNum) {
+  if(exprTable.getHead().getName() == "Table") {
+    return moveSpansToNewTable(exprTable, batchNum);
+  } else { // "Join"_
+    auto destDynamics = ExpressionArguments{};
+#ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
+    auto shallowCopyTableAndMoveKeyAndIndexSpan = [](ComplexExpression& radixPartitionExpr,
+                                                     size_t batchNum) -> ComplexExpression {
+      auto dynamics = ExpressionArguments{};
+      dynamics.emplace_back(
+          shallowCopy(get<ComplexExpression>(radixPartitionExpr.getArguments().at(0))));
+
+      auto& keyCol = get<ComplexExpression>(radixPartitionExpr.getArguments().at(1));
+      auto& keyList = get<ComplexExpression>(keyCol.getArguments().at(0));
+      auto&& span = const_cast<ExpressionSpanArgument&&>(
+          std::move((keyList).getSpanArguments().at(batchNum)));
+      ExpressionSpanArguments spans{};
+      spans.emplace_back(std::move(span));
+      auto destListExpr = ComplexExpression("List"_, {}, {}, std::move(spans));
+      auto destColDynamics = ExpressionArguments{};
+      destColDynamics.push_back(std::move(destListExpr));
+      auto destColExpr =
+          ComplexExpression(Symbol(keyCol.getHead().getName()), {}, std::move(destColDynamics), {});
+      dynamics.push_back(std::move(destColExpr));
+
+      ExpressionSpanArguments indexSpans{};
+      indexSpans.emplace_back(const_cast<ExpressionSpanArgument&&>(
+          std::move(radixPartitionExpr.getSpanArguments().at(batchNum))));
+      return {"RadixPartition"_, {}, std::move(dynamics), std::move(indexSpans)};
+    };
+    destDynamics.emplace_back(shallowCopyTableAndMoveKeyAndIndexSpan(
+        get<ComplexExpression>(exprTable.getArguments().at(0)), batchNum));
+    destDynamics.emplace_back(shallowCopyTableAndMoveKeyAndIndexSpan(
+        get<ComplexExpression>(exprTable.getArguments().at(1)), batchNum));
+#else
+    destDynamics.emplace_back(
+        moveSpansToNewTable(get<ComplexExpression>(exprTable.getArguments().at(0)), batchNum));
+    destDynamics.emplace_back(
+        moveSpansToNewTable(get<ComplexExpression>(exprTable.getArguments().at(1)), batchNum));
+#endif
+    destDynamics.emplace_back(get<ComplexExpression>(exprTable.getArguments().at(2))
+                                  .clone(CloneReason::EVALUATE_CONST_EXPRESSION));
+    return {"Join"_, {}, std::move(destDynamics), {}};
+  }
+}
+
+static ComplexExpression& getTableOrJoinReference(ComplexExpression& e, // NOLINT
+                                                  ComplexExpression& _false) {
+  if(e.getHead().getName() == "Table" || e.getHead().getName() == "Join")
     return e;
   auto [head, unused_, dynamics, spans] = std::move(e).decompose();
   for(auto& dynamic : dynamics) {
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
-      auto& result = getTableReference(get<ComplexExpression>(dynamic), _false);
+      auto& result = getTableOrJoinReference(get<ComplexExpression>(dynamic), _false);
       if(result.getHead().getName() == "Table") {
         e = ComplexExpression(std::move(head), {}, std::move(dynamics), std::move(spans));
         return result;
@@ -328,6 +407,8 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
       if(get<ComplexExpression>(dynamic).getHead().getName() == "Table") {
         copiedDynamics.push_back(ComplexExpression("Table"_, {}, {}, {}));
+      } else if(get<ComplexExpression>(dynamic).getHead().getName() == "Join") {
+        copiedDynamics.push_back(ComplexExpression("Join"_, {}, {}, {}));
       } else if(get<ComplexExpression>(dynamic).getHead() == "DateObject"_) {
         copiedDynamics.push_back(evaluateDateObject(get<ComplexExpression>(dynamic)));
       } else {
@@ -391,7 +472,7 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
 #endif
   }
 #endif
-  auto& subExprMasterTable = getTableReference(subExprMaster);
+  auto& subExprMasterTable = getTableOrJoinReference(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "Expr:               " << expr << std::endl;
   std::cout << "ExprTable:          " << exprTable << std::endl;
@@ -415,7 +496,7 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
 #endif
   ExpressionArguments results;
   for(int batchNum = startBatch; batchNum < startBatch + numBatches; ++batchNum) {
-    subExprMasterTable = moveSpansToNewTable(exprTable, batchNum);
+    subExprMasterTable = moveSpansToNewTableOrJoin(exprTable, batchNum);
     auto subExpr = cloneExprAndMoveTables(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "SubExpr #" << batchNum << ":         " << subExpr << std::endl;
@@ -444,7 +525,7 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
     subExprMaster = stripRootLetsFromExpression(std::move(subExprMaster));
     subExprMaster = updateTablePositionInSuperAggregateExpr(std::move(subExprMaster));
     subExprMaster = convertAggregatesToSuperAggregates(std::move(subExprMaster));
-    auto& finalExprTable = getTableReference(subExprMaster);
+    auto& finalExprTable = getTableOrJoinReference(subExprMaster);
     finalExprTable = std::move(result);
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "Final expr:         " << subExprMaster << std::endl;
@@ -486,7 +567,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
                                      bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
   bool groupPresent = expr.getHead().getName() == "Group";
-  auto& exprTable = getTableReference(expr);
+  auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
   auto numBatches = static_cast<int>(
@@ -559,7 +640,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   if(groupPresent) {
     expr = updateTablePositionInSuperAggregateExpr(std::move(expr));
     expr = convertAggregatesToSuperAggregates(std::move(expr));
-    auto& finalExprTable = getTableReference(expr);
+    auto& finalExprTable = getTableOrJoinReference(expr);
     finalExprTable = std::move(result);
     return evaluateFunc(std::move(expr));
   }
