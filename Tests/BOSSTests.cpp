@@ -351,10 +351,27 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
                                "Where"_("Equal"_("L_key"_, "O_key"_))));
 
     CHECK(result == "Join"_("RadixPartition"_("Table"_("L_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "L_key"_("List"_(1, 2, 3)), 0, 1, 2),
+                                              "Partition"_("L_key"_("List"_(1)), "Indexes"_(0)),
+                                              "Partition"_("L_key"_("List"_(2)), "Indexes"_(1)),
+                                              "Partition"_("L_key"_("List"_(3)), "Indexes"_(2))),
                             "RadixPartition"_("Table"_("O_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "O_key"_("List"_(1, 2, 3)), 3, 4, 5),
+                                              "Partition"_("O_key"_("List"_(1)), "Indexes"_(0)),
+                                              "Partition"_("O_key"_("List"_(2)), "Indexes"_(1)),
+                                              "Partition"_("O_key"_("List"_(3)), "Indexes"_(2))),
                             "Where"_("Equal"_("L_key"_, "O_key"_))));
+  }
+
+  SECTION("Simple join 2") {
+    auto intTable1 = "Table"_("L_key"_(createTwoSpansInt(1, 100)),
+                              "L_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
+                              "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto result =
+        eval("Join"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),
+                     "Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),
+                     "Where"_("Equal"_("L_key"_, "O_key"_))));
+
+    CHECK(result == "TBC"_());
   }
 }
 

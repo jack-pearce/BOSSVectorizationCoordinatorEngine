@@ -16,7 +16,7 @@
 
 // #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
-// #define DEBUG_MODE_VERBOSE
+#define DEBUG_MODE_VERBOSE
 // #define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
@@ -276,25 +276,21 @@ static ComplexExpression unionTables(ExpressionArguments&& tables) {
  * before the dynamic arg that is being cloned. This would remove the need to update the table
  * position in the super aggregate expression */
 static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
+  if(e.getHead().getName() == "Table" || e.getHead().getName() == "Join") {
+    return std::move(const_cast<ComplexExpression&>(e));
+  }
   auto& dynamics = e.getDynamicArguments();
   ExpressionArguments copiedDynamics;
   copiedDynamics.reserve(dynamics.size());
-  std::transform(dynamics.begin(), dynamics.end(), std::back_inserter(copiedDynamics),
-                 [](auto const& arg) {
-                   return std::visit(
-                       boss::utilities::overload(
-                           [](ComplexExpression const& expr) -> Expression {
-                             if(expr.getHead().getName() == "Table") {
-                               auto& table = const_cast<ComplexExpression&>(expr);
-                               auto [tableHead, unused1_, tableDynamics, unused2_] =
-                                   std::move(table).decompose();
-                               return ComplexExpression("Table"_, {}, std::move(tableDynamics), {});
-                             }
-                             return cloneExprAndMoveTables(expr);
-                           },
-                           [](auto const& otherTypes) -> Expression { return otherTypes; }),
-                       arg);
-                 });
+  std::transform(
+      dynamics.begin(), dynamics.end(), std::back_inserter(copiedDynamics), [](auto const& arg) {
+        return std::visit(boss::utilities::overload(
+                              [](ComplexExpression const& expr) -> Expression {
+                                return cloneExprAndMoveTables(expr);
+                              },
+                              [](auto const& otherTypes) -> Expression { return otherTypes; }),
+                          arg);
+      });
   return {e.getHead(), {}, std::move(copiedDynamics), {}};
 }
 
@@ -322,33 +318,24 @@ static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable,
   } else { // "Join"_
     auto destDynamics = ExpressionArguments{};
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
-    auto shallowCopyTableAndMoveKeyAndIndexSpan = [](ComplexExpression& radixPartitionExpr,
-                                                     size_t batchNum) -> ComplexExpression {
+    auto shallowCopyTableAndMovePartition = [](ComplexExpression& radixPartitionExpr,
+                                               size_t batchNum) -> ComplexExpression {
       auto dynamics = ExpressionArguments{};
       dynamics.emplace_back(
           shallowCopy(get<ComplexExpression>(radixPartitionExpr.getArguments().at(0))));
-
-      auto& keyCol = get<ComplexExpression>(radixPartitionExpr.getArguments().at(1));
-      auto& keyList = get<ComplexExpression>(keyCol.getArguments().at(0));
-      auto&& span = const_cast<ExpressionSpanArgument&&>(
-          std::move((keyList).getSpanArguments().at(batchNum)));
-      ExpressionSpanArguments spans{};
-      spans.emplace_back(std::move(span));
-      auto destListExpr = ComplexExpression("List"_, {}, {}, std::move(spans));
-      auto destColDynamics = ExpressionArguments{};
-      destColDynamics.push_back(std::move(destListExpr));
-      auto destColExpr =
-          ComplexExpression(Symbol(keyCol.getHead().getName()), {}, std::move(destColDynamics), {});
-      dynamics.push_back(std::move(destColExpr));
-
-      ExpressionSpanArguments indexSpans{};
-      indexSpans.emplace_back(const_cast<ExpressionSpanArgument&&>(
-          std::move(radixPartitionExpr.getSpanArguments().at(batchNum))));
-      return {"RadixPartition"_, {}, std::move(dynamics), std::move(indexSpans)};
+      dynamics.emplace_back(
+          get<ComplexExpression>(radixPartitionExpr.getArguments().at(1 + batchNum))
+              .getArguments()
+              .at(0));
+      dynamics.emplace_back(
+          get<ComplexExpression>(radixPartitionExpr.getArguments().at(1 + batchNum))
+              .getArguments()
+              .at(1));
+      return {"RadixPartition"_, {}, std::move(dynamics), {}};
     };
-    destDynamics.emplace_back(shallowCopyTableAndMoveKeyAndIndexSpan(
+    destDynamics.emplace_back(shallowCopyTableAndMovePartition(
         get<ComplexExpression>(exprTable.getArguments().at(0)), batchNum));
-    destDynamics.emplace_back(shallowCopyTableAndMoveKeyAndIndexSpan(
+    destDynamics.emplace_back(shallowCopyTableAndMovePartition(
         get<ComplexExpression>(exprTable.getArguments().at(1)), batchNum));
 #else
     destDynamics.emplace_back(
@@ -370,7 +357,7 @@ static ComplexExpression& getTableOrJoinReference(ComplexExpression& e, // NOLIN
   for(auto& dynamic : dynamics) {
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
       auto& result = getTableOrJoinReference(get<ComplexExpression>(dynamic), _false);
-      if(result.getHead().getName() == "Table") {
+      if(result.getHead().getName() == "Table" || result.getHead().getName() == "Join") {
         e = ComplexExpression(std::move(head), {}, std::move(dynamics), std::move(spans));
         return result;
       }
@@ -378,6 +365,19 @@ static ComplexExpression& getTableOrJoinReference(ComplexExpression& e, // NOLIN
   }
   e = ComplexExpression(std::move(head), {}, std::move(dynamics), std::move(spans));
   return _false;
+}
+
+static int getNumBatchesInTableOrJoinReference(ComplexExpression& e) {
+  if(e.getHead().getName() == "Table") {
+    return static_cast<int>(
+        get<ComplexExpression>(
+            get<ComplexExpression>(e.getDynamicArguments().at(0)).getDynamicArguments().at(0))
+            .getSpanArguments()
+            .size());
+  }
+  return static_cast<int>(
+             get<ComplexExpression>(e.getDynamicArguments().at(0)).getArguments().size()) -
+         1;
 }
 
 static Expression evaluateDateObject(const ComplexExpression& e) {
@@ -570,11 +570,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
-  auto numBatches = static_cast<int>(
-      get<ComplexExpression>(
-          get<ComplexExpression>(exprTable.getDynamicArguments().at(0)).getDynamicArguments().at(0))
-          .getSpanArguments()
-          .size());
+  auto numBatches = getNumBatchesInTableOrJoinReference(exprTable);
 #ifdef DEBUG_MULTI_THREAD
   std::cout << "Number of batches: " << numBatches << std::endl;
 #endif
@@ -648,6 +644,13 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
 }
 
 static Expression batchEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc) {
+#ifdef DEBUG_MODE_VERBOSE
+  std::cout << "Running batch evaluate of: " << e << std::endl;
+#endif
+#ifdef DEBUG_MODE
+  std::cout << "Running batch evaluate of: "
+            << utilities::injectDebugInfoToSpans(e.clone(CloneReason::FOR_TESTING)) << std::endl;
+#endif
   return evaluateFunc(std::move(e));
 }
 
@@ -666,8 +669,7 @@ void freeBOSSExpression(BOSSExpression* expression) {
 static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wholePipelineEvaluate,
                                      evaluteInternalFunction& firstEngineEvaluate,
                                      evaluteInternalFunction& pipelineEvaluateExceptFirstEngine,
-                                     bool lastOperationWasJoin,
-                                     bool finalEvaluateRequired = false) {
+                                     bool& lastOperationWasJoin) {
   if(std::holds_alternative<ComplexExpression>(e) &&
      get<ComplexExpression>(e).getHead().getName() != "Table") { // Need to evaluate, perform DFS
     auto [head, unused_, dynamics, spans] = get<ComplexExpression>(std::move(e)).decompose();
@@ -722,13 +724,7 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
         return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate, true);
       }
     }
-    if(!finalEvaluateRequired) { // Final evaluation required if root was not a Group
-      return std::move(unevaluated);
-    } else if(lastOperationWasJoin) {
-      return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine, false);
-    } else {
-      return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate, true);
-    }
+    return std::move(unevaluated);
   }
   return std::move(e); // Nothing to evaluate
 }
@@ -795,10 +791,27 @@ static Expression evaluateInternal(Expression&& e) {
       return result;
     };
 
+    bool lastOperationWasJoin = false;
     bool finalEvaluateRequired = expr.getHead().getName() != "Group";
+    auto result = get<ComplexExpression>(
+        evaluateDispatcher(std::move(expr), wholePipelineEvaluate, firstEngineEvaluate,
+                           pipelineEvaluateExceptFirstEngine, lastOperationWasJoin));
+#ifdef DEBUG_MODE_VERBOSE
+    std::cout << "Result after all pipeline breakers evaluated: " << result << std::endl;
+#endif
+#ifdef DEBUG_MODE
+    std::cout << "Result after all pipeline breakers evaluated: "
+              << utilities::injectDebugInfoToSpans(result.clone(CloneReason::FOR_TESTING))
+              << std::endl;
+#endif
 
-    return evaluateDispatcher(std::move(expr), wholePipelineEvaluate, firstEngineEvaluate,
-                              pipelineEvaluateExceptFirstEngine, false, finalEvaluateRequired);
+    if(!finalEvaluateRequired) { // Final evaluation not required if root was a Group
+      return result;
+    }
+    if(lastOperationWasJoin) {
+      return vectorizedEvaluate(std::move(result), pipelineEvaluateExceptFirstEngine, false);
+    }
+    return vectorizedEvaluate(std::move(result), wholePipelineEvaluate, true);
   };
 }
 
