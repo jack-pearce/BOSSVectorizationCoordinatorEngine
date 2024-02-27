@@ -212,33 +212,36 @@ static ComplexExpression convertAggregatesToSuperAggregates(ComplexExpression&& 
   ExpressionArguments outputDynamics;
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
   std::transform(std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
-                 std::back_inserter(outputDynamics), [](auto&& arg_) -> ComplexExpression {
-                   auto&& arg = get<ComplexExpression>(std::forward<decltype(arg_)>(arg_));
-                   if(arg.getHead().getName() == "Count") {
-                     auto [unused1, unused2, argDynamics, unused3] = std::move(arg).decompose();
-                     return {"Sum"_, {}, std::move(argDynamics), {}};
+                 std::back_inserter(outputDynamics), [](Expression&& arg_) -> ComplexExpression {
+                   auto arg = get<ComplexExpression>(std::move(arg_));
+                   if(arg.getHead().getName() == "Table" || arg.getHead().getName() == "By") {
+                     return std::move(arg);
                    }
-                   if(arg.getHead().getName() == "As") {
+                   auto [head, unused1, argDynamics, unused2] = std::move(arg).decompose();
+                   if(head.getName() == "As") {
                      ExpressionArguments outputAsDynamics;
-                     auto [asHead, unused1, asDynamics, unused2] = std::move(arg).decompose();
-                     assert(asDynamics.size() % 2 == 0);
-                     auto it = std::make_move_iterator(asDynamics.begin());
-                     while(it != std::make_move_iterator(asDynamics.end())) {
+                     assert(argDynamics.size() % 2 == 0);
+                     auto it = std::make_move_iterator(argDynamics.begin());
+                     while(it != std::make_move_iterator(argDynamics.end())) {
                        outputAsDynamics.push_back(std::move(*it++));
-                       if(std::get<ComplexExpression>(*it).getHead().getName() == "Count") {
-                         ExpressionArguments aggColumnName;
-                         aggColumnName.emplace_back(
-                             Symbol(get<Symbol>(outputAsDynamics.back()).getName()));
-                         outputAsDynamics.emplace_back(
-                             ComplexExpression("Sum"_, {}, std::move(aggColumnName), {}));
-                         ++it;
-                       } else {
-                         outputAsDynamics.push_back(std::move(*it++));
+                       auto opExpr = get<ComplexExpression>(std::move(*it++));
+                       auto [opHead, unused3, opDynamics, unused4] = std::move(opExpr).decompose();
+                       if(opHead.getName() == "Count") {
+                         opHead = "Sum"_;
                        }
+                       ExpressionArguments aggColumnName;
+                       aggColumnName.emplace_back(get<Symbol>(outputAsDynamics.back()));
+                       outputAsDynamics.emplace_back(
+                           ComplexExpression(std::move(opHead), {}, std::move(aggColumnName), {}));
                      }
-                     return {std::move(asHead), {}, std::move(outputAsDynamics), {}};
+                     return {std::move(head), {}, std::move(outputAsDynamics), {}};
                    }
-                   return std::move(arg);
+                   if(head.getName() == "Count") {
+                     head = "Sum"_;
+                   }
+                   Symbol attrSymbol = get<Symbol>(argDynamics.back());
+                   return "As"_(std::move(attrSymbol),
+                                ComplexExpression{std::move(head), {}, std::move(argDynamics), {}});
                  });
   return {std::move(head), {}, std::move(outputDynamics), {}};
 }

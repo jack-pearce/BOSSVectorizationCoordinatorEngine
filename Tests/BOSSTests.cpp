@@ -178,12 +178,14 @@ TEST_CASE("Delegate bootstrapping - group multiple spans", "[vectorization-engin
                         "payload"_(createTwoSpansIntStartingFrom(4)));
 
   SECTION("Delegate bootstrapping - group sum multiple spans") {
-    auto output = eval("Group"_(table.clone(CloneReason::FOR_TESTING), "Sum"_("key"_)));
+    auto output =
+        eval("Group"_(table.clone(CloneReason::FOR_TESTING), "As"_("key"_, "Sum"_("key"_))));
     CHECK(output == "Table"_("key"_("List"_(6)))); // NOLINT
   }
 
   SECTION("Delegate bootstrapping - group count multiple spans") {
-    auto output = eval("Group"_(table.clone(CloneReason::FOR_TESTING), "Count"_("key"_)));
+    auto output =
+        eval("Group"_(table.clone(CloneReason::FOR_TESTING), "As"_("key"_, "Count"_("key"_))));
     CHECK(output == "Table"_("key"_("List"_(4)))); // NOLINT
   }
 
@@ -208,7 +210,7 @@ TEST_CASE("Delegate bootstrapping - group multiple spans", "[vectorization-engin
     auto tableFourSpans = "Table"_("key"_(createFourSpansIntStartingFrom(0)),
                                    "payload"_(createFourSpansIntStartingFrom(8)));
 
-    auto output = eval("Group"_(std::move(tableFourSpans), "Sum"_("key"_)));
+    auto output = eval("Group"_(std::move(tableFourSpans), "As"_("key"_, "Sum"_("key"_))));
     CHECK(output == "Table"_("key"_("List"_(22)))); // NOLINT
   }
 }
@@ -267,7 +269,7 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
                                       "Greater"_("DateObject"_("1995-12-31"), "L_SHIPDATE"_),
                                       "Greater"_("L_SHIPDATE"_, "DateObject"_("1993-12-31"))))),
             "As"_("revenue"_, "Times"_("L_EXTENDEDPRICE"_, "L_DISCOUNT"_))),
-        "Sum"_("revenue"_)));
+        "As"_("revenue"_, "Sum"_("revenue"_))));
 
     CHECK(output == "Table"_("revenue"_("List"_(34850.16 * 0.05 + 25284.00 * 0.06)))); // NOLINT
   }
@@ -309,7 +311,8 @@ TEST_CASE("Delegate bootstrapping - more complex queries (without Join)",
                                                     "L_EXTENDEDPRICE"_, "L_EXTENDEDPRICE"_)),
                                    "Where"_("And"_("Greater"_(24, "L_QUANTITY"_), // NOLINT
                                                    "Greater"_("L_DISCOUNT"_, 0.052)))),
-                         "By"_("L_QUANTITY"_), "Sum"_("L_EXTENDEDPRICE"_)),
+                         "By"_("L_QUANTITY"_),
+                         "As"_("L_EXTENDEDPRICE"_, "Sum"_("L_EXTENDEDPRICE"_))),
                 "Where"_("Greater"_("L_QUANTITY"_, 6))),
             "As"_("count"_, "Count"_("L_QUANTITY"_))),
         "Where"_("Greater"_("count"_, 1))));
@@ -366,10 +369,9 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
                               "L_value"_(createTwoSpansInt(1, 4))); // NOLINT
     auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
                               "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
-    auto result =
-        eval("Join"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),
-                     "Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),
-                     "Where"_("Equal"_("L_key"_, "O_key"_))));
+    auto result = eval("Join"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),
+                               "Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),
+                               "Where"_("Equal"_("L_key"_, "O_key"_))));
 
     CHECK(result == "TBC"_());
   }
