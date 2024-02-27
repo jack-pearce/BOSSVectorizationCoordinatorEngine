@@ -228,12 +228,12 @@ TEST_CASE("Delegate bootstrapping - TPC-H Q6", "[vectorization-engine]") {
   };
 
   auto lineitem =
-      "Table"_("L_ORDERKEY"_(createTwoTwoNumIntSpans(1, 1, 2, 3)),              // NOLINT
-               "L_PARTKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
-               "L_SUPPKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
-               "L_RETURNFLAG"_(createTwoTwoStrStringSpans("N", "N", "A", "A")), // NOLINT
-               "L_LINESTATUS"_(createTwoTwoStrStringSpans("O", "O", "F", "F")), // NOLINT
-               "L_QUANTITY"_(createTwoTwoNumIntSpans(17, 21, 8, 5)),            // NOLINT
+      "Table"_("L_ORDERKEY"_(createTwoTwoNumIntSpans(1, 1, 2, 3)),           // NOLINT
+               "L_PARTKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),            // NOLINT
+               "L_SUPPKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),            // NOLINT
+               "L_RETURNFLAG"_(createTwoTwoNumIntSpans('N', 'N', 'A', 'A')), // NOLINT
+               "L_LINESTATUS"_(createTwoTwoNumIntSpans('O', 'O', 'F', 'F')), // NOLINT
+               "L_QUANTITY"_(createTwoTwoNumIntSpans(17, 21, 8, 5)),         // NOLINT
                "L_EXTENDEDPRICE"_(
                    createTwoTwoNumFloatSpans(17954.55, 34850.16, 7712.48, 25284.00)), // NOLINT
                "L_DISCOUNT"_(createTwoTwoNumFloatSpans(0.10, 0.05, 0.06, 0.06)),      // NOLINT
@@ -289,12 +289,12 @@ TEST_CASE("Delegate bootstrapping - more complex queries (without Join)",
   };
 
   auto lineitem =
-      "Table"_("L_ORDERKEY"_(createTwoTwoNumIntSpans(1, 1, 2, 3)),              // NOLINT
-               "L_PARTKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
-               "L_SUPPKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),               // NOLINT
-               "L_RETURNFLAG"_(createTwoTwoStrStringSpans("N", "N", "A", "A")), // NOLINT
-               "L_LINESTATUS"_(createTwoTwoStrStringSpans("O", "O", "F", "F")), // NOLINT
-               "L_QUANTITY"_(createTwoTwoNumIntSpans(17, 21, 8, 5)),            // NOLINT
+      "Table"_("L_ORDERKEY"_(createTwoTwoNumIntSpans(1, 1, 2, 3)),           // NOLINT
+               "L_PARTKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),            // NOLINT
+               "L_SUPPKEY"_(createTwoTwoNumIntSpans(1, 2, 3, 4)),            // NOLINT
+               "L_RETURNFLAG"_(createTwoTwoNumIntSpans('N', 'N', 'A', 'A')), // NOLINT
+               "L_LINESTATUS"_(createTwoTwoNumIntSpans('O', 'O', 'F', 'F')), // NOLINT
+               "L_QUANTITY"_(createTwoTwoNumIntSpans(17, 21, 8, 5)),         // NOLINT
                "L_EXTENDEDPRICE"_(
                    createTwoTwoNumFloatSpans(17954.55, 34850.16, 7712.48, 25284.00)), // NOLINT
                "L_DISCOUNT"_(createTwoTwoNumFloatSpans(0.10, 0.05, 0.06, 0.06)),      // NOLINT
