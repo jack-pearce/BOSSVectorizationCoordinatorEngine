@@ -577,8 +577,13 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
 #ifdef DEBUG_MULTI_THREAD
   std::cout << "Number of batches: " << numBatches << std::endl;
 #endif
-  if(numBatches == 0)
-    return evaluateFunc(std::move(expr));
+  if(numBatches == 0) {
+    if(exprTable.getHead().getName() == "Table") {
+      return std::move(exprTable);
+    } else {
+      return "Table"_();
+    }
+  }
 
   int dop = std::min(numBatches, vectorization::config::maxVectorizedDOP);
   ExpressionArguments results;
