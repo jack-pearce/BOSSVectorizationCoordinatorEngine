@@ -333,6 +333,24 @@ auto createTwoSpansInt = [](intType n1, intType n2) {
   return boss::expressions::ComplexExpression("List"_, {}, {}, std::move(args));
 };
 
+auto createFourSpansIntFrom = [](intType n) {
+  using SpanArguments = boss::expressions::ExpressionSpanArguments;
+  std::vector<intType> v1 = {7 + n, 3 + n};
+  std::vector<intType> v2 = {6 + n, 2 + n};
+  std::vector<intType> v3 = {5 + n, 1 + n};
+  std::vector<intType> v4 = {4 + n, 0 + n};
+  auto s1 = boss::Span<intType>(std::move(v1));
+  auto s2 = boss::Span<intType>(std::move(v2));
+  auto s3 = boss::Span<intType>(std::move(v3));
+  auto s4 = boss::Span<intType>(std::move(v4));
+  SpanArguments args;
+  args.emplace_back(std::move(s1));
+  args.emplace_back(std::move(s2));
+  args.emplace_back(std::move(s3));
+  args.emplace_back(std::move(s4));
+  return boss::expressions::ComplexExpression("List"_, {}, {}, std::move(args));
+};
+
 TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
   auto engine = boss::engines::BootstrapEngine();
   REQUIRE(librariesToTest.size() >= 2);
@@ -353,15 +371,7 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
     auto result = eval("Join"_(std::move(intTable1), std::move(intTable2),
                                "Where"_("Equal"_("L_key"_, "O_key"_))));
 
-    CHECK(result == "Join"_("RadixPartition"_("Table"_("L_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "Partition"_("L_key"_("List"_(1)), "Indexes"_(0)),
-                                              "Partition"_("L_key"_("List"_(2)), "Indexes"_(1)),
-                                              "Partition"_("L_key"_("List"_(3)), "Indexes"_(2))),
-                            "RadixPartition"_("Table"_("O_value"_("List"_(1, 2, 3, 4, 5, 6))),
-                                              "Partition"_("O_key"_("List"_(1)), "Indexes"_(0)),
-                                              "Partition"_("O_key"_("List"_(2)), "Indexes"_(1)),
-                                              "Partition"_("O_key"_("List"_(3)), "Indexes"_(2))),
-                            "Where"_("Equal"_("L_key"_, "O_key"_))));
+    CHECK(result == "TBC"_());
   }
 
   SECTION("Simple join 2") {
@@ -371,6 +381,43 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
                               "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
     auto result = eval("Join"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),
                                "Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),
+                               "Where"_("Equal"_("L_key"_, "O_key"_))));
+
+    CHECK(result == "TBC"_());
+  }
+
+  SECTION("Simple join 3") {
+    auto intTable1 = "Table"_("L_key"_(createTwoSpansInt(1, 100)),
+                              "L_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
+                              "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto result =
+        eval("Join"_("Group"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),"Sum"_("L_key"_)),
+                     "Group"_("Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),"Sum"_("O_key"_)),
+                     "Where"_("Equal"_("L_key"_, "O_key"_))));
+
+    CHECK(result == "Table"_());
+  }
+
+  SECTION("Simple join 4") {
+    auto intTable1 = "Table"_("L_key"_(createTwoSpansInt(1, 100)),
+                              "L_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
+                              "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
+    auto result =
+        eval("Join"_("Select"_(std::move(intTable1), "Where"_("Greater"_("L_key"_, 1))),
+                     std::move(intTable2),
+                     "Where"_("Equal"_("L_key"_, "O_key"_))));
+
+    CHECK(result == "TBC"_());
+  }
+
+  SECTION("Simple join 5") {
+    auto intTable1 = "Table"_("L_key"_(createFourSpansIntFrom(1)),
+                              "L_value"_(createFourSpansIntFrom(1))); // NOLINT
+    auto intTable2 = "Table"_("O_key"_(createFourSpansIntFrom(4)),
+                              "O_value"_(createFourSpansIntFrom(4))); // NOLINT
+    auto result = eval("Join"_(std::move(intTable1), std::move(intTable2),
                                "Where"_("Equal"_("L_key"_, "O_key"_))));
 
     CHECK(result == "TBC"_());

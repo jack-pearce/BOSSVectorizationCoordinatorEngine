@@ -215,10 +215,10 @@ static ComplexExpression convertAggregatesToSuperAggregates(ComplexExpression&& 
                  std::back_inserter(outputDynamics), [](Expression&& arg_) -> ComplexExpression {
                    auto arg = get<ComplexExpression>(std::move(arg_));
                    if(arg.getHead().getName() == "Table" || arg.getHead().getName() == "By") {
-                     return std::move(arg);
+                     return arg;
                    }
-                   auto [head, unused1, argDynamics, unused2] = std::move(arg).decompose();
-                   if(head.getName() == "As") {
+                   auto [argHead, unused1, argDynamics, unused2] = std::move(arg).decompose();
+                   if(argHead.getName() == "As") {
                      ExpressionArguments outputAsDynamics;
                      assert(argDynamics.size() % 2 == 0);
                      auto it = std::make_move_iterator(argDynamics.begin());
@@ -234,14 +234,14 @@ static ComplexExpression convertAggregatesToSuperAggregates(ComplexExpression&& 
                        outputAsDynamics.emplace_back(
                            ComplexExpression(std::move(opHead), {}, std::move(aggColumnName), {}));
                      }
-                     return {std::move(head), {}, std::move(outputAsDynamics), {}};
+                     return {std::move(argHead), {}, std::move(outputAsDynamics), {}};
                    }
-                   if(head.getName() == "Count") {
-                     head = "Sum"_;
+                   if(argHead.getName() == "Count") {
+                     argHead = "Sum"_;
                    }
                    Symbol attrSymbol = get<Symbol>(argDynamics.back());
                    return "As"_(std::move(attrSymbol),
-                                ComplexExpression{std::move(head), {}, std::move(argDynamics), {}});
+                                ComplexExpression{std::move(argHead), {}, std::move(argDynamics), {}});
                  });
   return {std::move(head), {}, std::move(outputDynamics), {}};
 }
@@ -445,6 +445,7 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
                                            bool hazardAdaptiveEngineInPipeline) {
   auto subExprMaster = generateSubExpressionClone(expr);
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
+  auto stats = std::optional<StatsRaiiWrapper>(std::nullopt);
   if(hazardAdaptiveEngineInPipeline) {
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "SubExprMaster before preparing: " << subExprMaster << std::endl;
@@ -460,9 +461,8 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
 #if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
     std::cout << "Identified " << predicateCount << " predicates" << std::endl;
 #endif
-    std::optional<StatsRaiiWrapper> stats =
-        predicateCount > 0 ? std::make_optional<StatsRaiiWrapper>(predicateCount) : std::nullopt;
-    if(stats.has_value()) {
+    if(predicateCount > 0){
+      stats.emplace(predicateCount);
       subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
     }
 #ifdef DEBUG_MODE_VERBOSE
@@ -651,15 +651,16 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   return result;
 }
 
-static Expression batchEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc) {
+static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc) {
+  expr = addParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
 #ifdef DEBUG_MODE_VERBOSE
-  std::cout << "Running batch evaluate of: " << e << std::endl;
+  std::cout << "Running batch evaluate of: " << expr << std::endl;
 #endif
 #ifdef DEBUG_MODE
   std::cout << "Running batch evaluate of: "
-            << utilities::injectDebugInfoToSpans(e.clone(CloneReason::FOR_TESTING)) << std::endl;
+            << utilities::injectDebugInfoToSpans(expr.clone(CloneReason::FOR_TESTING)) << std::endl;
 #endif
-  return evaluateFunc(std::move(e));
+  return evaluateFunc(std::move(expr));
 }
 
 /***************************** BOSS API CONVENIENCE FUNCTIONS *****************************/
