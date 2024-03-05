@@ -193,9 +193,10 @@ static ComplexExpression stripRootLetsFromExpression(ComplexExpression&& expr) {
   return std::move(expr);
 }
 
-/* Precondition: A single Top or Group is present and is the top level operator */
+/* Precondition: A single Order, Top or Group is present and is the top level operator */
 static ComplexExpression updateTablePositionInPipelineBreakerExpr(ComplexExpression&& expr) {
-  assert(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top");
+  assert(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
+         expr.getHead().getName() == "Order");
   ExpressionArguments outputDynamics;
   auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
   outputDynamics.emplace_back(ComplexExpression("Table"_, {}, {}, {}));
@@ -569,7 +570,8 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
                                      bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
   bool pipelineBreakerPresent =
-      (expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top");
+      (expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
+       expr.getHead().getName() == "Order");
   auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
@@ -726,7 +728,8 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
       lastOperationWasJoin = true;
       return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
     } else if(unevaluated.getHead().getName() == "Group" ||
-              unevaluated.getHead().getName() == "Top") { // Pipeline breaker
+              unevaluated.getHead().getName() == "Top" ||
+              unevaluated.getHead().getName() == "Order") { // Pipeline breaker
       bool lastOperationWasJoinTmp = lastOperationWasJoin;
       lastOperationWasJoin = false;
       if(lastOperationWasJoinTmp) {
@@ -804,7 +807,8 @@ static Expression evaluateInternal(Expression&& e) {
 
     bool lastOperationWasJoin = false;
     bool finalEvaluateRequired =
-        !(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top");
+        !(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
+          expr.getHead().getName() == "Order");
     auto result = get<ComplexExpression>(
         evaluateDispatcher(std::move(expr), wholePipelineEvaluate, firstEngineEvaluate,
                            pipelineEvaluateExceptFirstEngine, lastOperationWasJoin));
