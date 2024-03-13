@@ -85,6 +85,7 @@ static boss::ComplexExpression shallowCopy(boss::ComplexExpression const& e) {
   auto const& dynamics = e.getDynamicArguments();
   auto const& spans = e.getSpanArguments();
   boss::ExpressionArguments dynamicsCopy;
+  dynamicsCopy.reserve(dynamics.size());
   std::transform(dynamics.begin(), dynamics.end(), std::back_inserter(dynamicsCopy),
                  [](auto const& arg) {
                    return std::visit(
@@ -96,6 +97,7 @@ static boss::ComplexExpression shallowCopy(boss::ComplexExpression const& e) {
                        arg);
                  });
   boss::expressions::ExpressionSpanArguments spansCopy;
+  spansCopy.reserve(spans.size());
   std::transform(spans.begin(), spans.end(), std::back_inserter(spansCopy), [](auto const& span) {
     return std::visit(
         [](auto const& typedSpan) -> boss::expressions::ExpressionSpanArgument {
