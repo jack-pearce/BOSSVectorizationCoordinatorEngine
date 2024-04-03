@@ -572,8 +572,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
                                      bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
   bool pipelineBreakerPresent =
-      (expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
-       expr.getHead().getName() == "Order");
+      (expr.getHead().getName() == "Top" || expr.getHead().getName() == "Order");
   auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
@@ -688,16 +687,9 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
     auto [head, unused_, dynamics, spans] = get<ComplexExpression>(std::move(e)).decompose();
     ExpressionArguments evaluatedDynamics;
     evaluatedDynamics.reserve(dynamics.size());
-    if(head.getName() != "Join") { // Continue DFS as normal
-      std::transform(
-          std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
-          std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
-            return evaluateDispatcher(std::forward<decltype(arg)>(arg), wholePipelineEvaluate,
-                                      firstEngineEvaluate, pipelineEvaluateExceptFirstEngine,
-                                      lastOperationWasJoin);
-          });
-    } else { // Special case for Join: Double evaluate branches (1st to evaluate any pipeline
-             // breakers, 2nd to evaluate expression with correct lastOperationWasJoin value)
+    // Special case for Join: Double evaluate branches (1st to evaluate any pipeline
+    // breakers, 2nd to evaluate expression with correct lastOperationWasJoin value)
+    if(head.getName() == "Join") {
       int index = 0;
       std::transform(
           std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
@@ -723,14 +715,52 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
                                         wholePipelineEvaluate, true);
             }
           });
+      // Special case for Group: Double evaluate table expr (1st to evaluate any pipeline
+      // breakers, 2nd to evaluate any remaining expression)
+    } else if(head.getName() == "Group") {
+      int index = 0;
+      std::transform(
+          std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
+          std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
+            if(index++ >= 1) {
+              return std::forward<decltype(arg)>(arg); // By and As args
+            }
+            if(get<ComplexExpression>(arg).getHead().getName() == "Table") {
+              return std::forward<decltype(arg)>(arg); // Nothing to evaluate
+            }
+            lastOperationWasJoin = false;
+            auto evaluatedArg = evaluateDispatcher( // Evaluate any pipeline breakers if present
+                std::forward<decltype(arg)>(arg), wholePipelineEvaluate, firstEngineEvaluate,
+                pipelineEvaluateExceptFirstEngine, lastOperationWasJoin);
+            if(get<ComplexExpression>(evaluatedArg).getHead().getName() == "Table") {
+              return std::move(evaluatedArg); // Nothing to evaluate
+            }
+            if(lastOperationWasJoin) { // Contained a join so omit first engine
+              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
+                                        pipelineEvaluateExceptFirstEngine, false);
+            } else { // Evaluate remaining pipeline-able expression
+              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
+                                        wholePipelineEvaluate, true);
+            }
+          });
+    } else { // Continue DFS as normal
+      std::transform(
+          std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
+          std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
+            return evaluateDispatcher(std::forward<decltype(arg)>(arg), wholePipelineEvaluate,
+                                      firstEngineEvaluate, pipelineEvaluateExceptFirstEngine,
+                                      lastOperationWasJoin);
+          });
     }
     auto unevaluated =
         ComplexExpression(std::move(head), {}, std::move(evaluatedDynamics), std::move(spans));
     if(unevaluated.getHead().getName() == "Join") { // Pipeline breaker
       lastOperationWasJoin = true;
       return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
-    } else if(unevaluated.getHead().getName() == "Group" ||
-              unevaluated.getHead().getName() == "Top" ||
+    } else if(unevaluated.getHead().getName() == "Group") { // Pipeline breaker
+      lastOperationWasJoin = false;
+      return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
+    } else if(unevaluated.getHead().getName() == "Top" ||
               unevaluated.getHead().getName() == "Order") { // Pipeline breaker
       bool lastOperationWasJoinTmp = lastOperationWasJoin;
       lastOperationWasJoin = false;
