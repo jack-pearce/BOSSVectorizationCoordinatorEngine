@@ -16,7 +16,7 @@
 // #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
-//#define FIRST_ENGINE_IS_STORAGE_ENGINE
+#define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
 using std::string_literals::operator""s;
