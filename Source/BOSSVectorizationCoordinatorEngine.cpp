@@ -3,7 +3,6 @@
 #include <ExpressionUtilities.hpp>
 #include <Utilities.hpp>
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <iomanip>
 #include <iostream>
@@ -17,7 +16,7 @@
 // #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
-#define FIRST_ENGINE_IS_STORAGE_ENGINE
+//#define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
 using std::string_literals::operator""s;
@@ -186,69 +185,6 @@ public:
 private:
   std::unique_ptr<SelectOperatorStates> selectOperatorStates;
 };
-
-static ComplexExpression stripRootLetsFromExpression(ComplexExpression&& expr) {
-  while(expr.getHead().getName() == "Let") {
-    auto [unused1, unused2, dynamics, unused3] = std::move(expr).decompose();
-    expr = get<ComplexExpression>(std::move(dynamics.at(0)));
-  }
-  return std::move(expr);
-}
-
-/* Precondition: A single Order, Top or Group is present and is the top level operator */
-static ComplexExpression updateTablePositionInPipelineBreakerExpr(ComplexExpression&& expr) {
-  assert(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
-         expr.getHead().getName() == "Order");
-  ExpressionArguments outputDynamics;
-  auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
-  outputDynamics.emplace_back(ComplexExpression("Table"_, {}, {}, {}));
-  std::transform(std::make_move_iterator(next(dynamics.begin())),
-                 std::make_move_iterator(dynamics.end()), std::back_inserter(outputDynamics),
-                 [](auto&& arg) { return std::forward<decltype(arg)>(arg); });
-  return {std::move(head), {}, std::move(outputDynamics), {}};
-}
-
-/* Precondition: A most one Group is present and, if so, is the top level operator */
-static ComplexExpression convertAggregatesToSuperAggregates(ComplexExpression&& expr) {
-  if(expr.getHead().getName() != "Group")
-    return std::move(expr);
-  ExpressionArguments outputDynamics;
-  auto [head, unused, dynamics, unused_] = std::move(expr).decompose();
-  std::transform(std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
-                 std::back_inserter(outputDynamics), [](Expression&& arg_) -> ComplexExpression {
-                   auto arg = get<ComplexExpression>(std::move(arg_));
-                   if(arg.getHead().getName() == "Table" || arg.getHead().getName() == "By") {
-                     return arg;
-                   }
-                   auto [argHead, unused1, argDynamics, unused2] = std::move(arg).decompose();
-                   if(argHead.getName() == "As") {
-                     ExpressionArguments outputAsDynamics;
-                     assert(argDynamics.size() % 2 == 0);
-                     auto it = std::make_move_iterator(argDynamics.begin());
-                     while(it != std::make_move_iterator(argDynamics.end())) {
-                       outputAsDynamics.push_back(std::move(*it++));
-                       auto opExpr = get<ComplexExpression>(std::move(*it++));
-                       auto [opHead, unused3, opDynamics, unused4] = std::move(opExpr).decompose();
-                       if(opHead.getName() == "Count") {
-                         opHead = "Sum"_;
-                       }
-                       ExpressionArguments aggColumnName;
-                       aggColumnName.emplace_back(get<Symbol>(outputAsDynamics.back()));
-                       outputAsDynamics.emplace_back(
-                           ComplexExpression(std::move(opHead), {}, std::move(aggColumnName), {}));
-                     }
-                     return {std::move(argHead), {}, std::move(outputAsDynamics), {}};
-                   }
-                   if(argHead.getName() == "Count") {
-                     argHead = "Sum"_;
-                   }
-                   Symbol attrSymbol = get<Symbol>(argDynamics.back());
-                   return "As"_(
-                       std::move(attrSymbol),
-                       ComplexExpression{std::move(argHead), {}, std::move(argDynamics), {}});
-                 });
-  return {std::move(head), {}, std::move(outputDynamics), {}};
-}
 
 static ComplexExpression unionTables(ExpressionArguments&& tables) {
   auto it = tables.begin();
@@ -441,10 +377,12 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
 
 /* Precondition: There is at most one pipeline breaker which can only be a Group or Top which is at
  * the top level. */
-static void vectorizedEvaluateSingleThread(
-    const ComplexExpression& expr, ComplexExpression& exprTable, bool pipelineBreakerPresent,
-    evaluteInternalFunction& evaluateFunc, int startBatch, int numBatches, int vectorizedDOP,
-    ExpressionArguments& outputVector, int outputIndex, bool hazardAdaptiveEngineInPipeline) {
+static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
+                                           ComplexExpression& exprTable,
+                                           evaluteInternalFunction& evaluateFunc, int startBatch,
+                                           int numBatches, int vectorizedDOP,
+                                           ExpressionArguments& outputVector, int outputIndex,
+                                           bool hazardAdaptiveEngineInPipeline) {
   auto subExprMaster = generateSubExpressionClone(expr);
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
   auto stats = std::optional<StatsRaiiWrapper>(std::nullopt);
@@ -526,36 +464,6 @@ static void vectorizedEvaluateSingleThread(
               << std::endl;
 #endif
   auto result = unionTables(std::move(results));
-  if(pipelineBreakerPresent) {
-    subExprMaster = stripRootLetsFromExpression(std::move(subExprMaster));
-    subExprMaster = updateTablePositionInPipelineBreakerExpr(std::move(subExprMaster));
-    subExprMaster = convertAggregatesToSuperAggregates(std::move(subExprMaster));
-    auto& finalExprTable = getTableOrJoinReference(subExprMaster);
-    finalExprTable = std::move(result);
-#ifdef DEBUG_MODE_VERBOSE
-    std::cout << "Final expr:         " << subExprMaster << std::endl;
-#endif
-#ifdef DEBUG_MODE
-    std::cout << "Final expr:         "
-              << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
-              << std::endl;
-#endif
-#if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
-    auto finalResult = evaluateFunc(std::move(subExprMaster));
-#ifdef DEBUG_MODE_VERBOSE
-    std::cout << "Final result:       " << finalResult << std::endl;
-#else
-    std::cout << "Final result:       "
-              << utilities::injectDebugInfoToSpans(finalResult.clone(CloneReason::FOR_TESTING))
-              << std::endl;
-#endif
-    outputVector[outputIndex] = std::move(finalResult);
-    return;
-#else
-    outputVector[outputIndex] = evaluateFunc(std::move(subExprMaster));
-    return;
-#endif
-  }
 #if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "Final result:       " << result << std::endl;
@@ -571,8 +479,6 @@ static void vectorizedEvaluateSingleThread(
 static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc,
                                      bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
-  bool pipelineBreakerPresent =
-      (expr.getHead().getName() == "Top" || expr.getHead().getName() == "Order");
   auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
@@ -595,8 +501,8 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   std::cout << "Using " << dop << " degrees of parallelism" << std::endl;
 #endif
   if(dop == 1) {
-    vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, evaluateFunc, 0,
-                                   numBatches, 1, results, 0, hazardAdaptiveEngineInPipeline);
+    vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, 0, numBatches, 1, results, 0,
+                                   hazardAdaptiveEngineInPipeline);
   } else {
     ThreadPool::getInstance();
 
@@ -610,11 +516,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
       std::cout << "Thread " << i << " processing " << batchesPerThread
                 << " batches starting from batch " << startBatchNum << std::endl;
 #endif
-      ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent, &evaluateFunc,
-                                         startBatchNum, batchesPerThread, dop, &results, i,
+      ThreadPool::getInstance().enqueue([&expr, &exprTable, &evaluateFunc, startBatchNum,
+                                         batchesPerThread, dop, &results, i,
                                          hazardAdaptiveEngineInPipeline]() {
-        vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, evaluateFunc,
-                                       startBatchNum, batchesPerThread, dop, results, i,
+        vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, startBatchNum,
+                                       batchesPerThread, dop, results, i,
                                        hazardAdaptiveEngineInPipeline);
       });
       startBatchNum += batchesPerThread;
@@ -624,12 +530,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
     std::cout << "Thread " << (dop - 1) << " processing " << batchesPerThread
               << " batches starting from batch " << startBatchNum << std::endl;
 #endif
-    ThreadPool::getInstance().enqueue([&expr, &exprTable, pipelineBreakerPresent, &evaluateFunc,
-                                       startBatchNum, batchesPerThread, dop, &results, i = dop - 1,
+    ThreadPool::getInstance().enqueue([&expr, &exprTable, &evaluateFunc, startBatchNum,
+                                       batchesPerThread, dop, &results, i = dop - 1,
                                        hazardAdaptiveEngineInPipeline]() {
-      vectorizedEvaluateSingleThread(expr, exprTable, pipelineBreakerPresent, evaluateFunc,
-                                     startBatchNum, batchesPerThread, dop, results, i,
-                                     hazardAdaptiveEngineInPipeline);
+      vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, startBatchNum, batchesPerThread,
+                                     dop, results, i, hazardAdaptiveEngineInPipeline);
     });
 
     ThreadPool::getInstance().waitUntilComplete(dop);
@@ -644,13 +549,6 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
             << std::endl;
 #endif
 
-  if(pipelineBreakerPresent) {
-    expr = updateTablePositionInPipelineBreakerExpr(std::move(expr));
-    expr = convertAggregatesToSuperAggregates(std::move(expr));
-    auto& finalExprTable = getTableOrJoinReference(expr);
-    finalExprTable = std::move(result);
-    return evaluateFunc(std::move(expr));
-  }
   return result;
 }
 
@@ -715,15 +613,15 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
                                         wholePipelineEvaluate, true);
             }
           });
-      // Special case for Group: Double evaluate table expr (1st to evaluate any pipeline
-      // breakers, 2nd to evaluate any remaining expression)
-    } else if(head.getName() == "Group") {
+      // Special case for Group, Top, Order: Double evaluate table expr (1st to evaluate any
+      // pipeline breakers, 2nd to evaluate any remaining expression)
+    } else if(head.getName() == "Group" || head.getName() == "Top" || head.getName() == "Order") {
       int index = 0;
       std::transform(
           std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
           std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
             if(index++ >= 1) {
-              return std::forward<decltype(arg)>(arg); // By and As args
+              return std::forward<decltype(arg)>(arg); // By and As args etc.
             }
             if(get<ComplexExpression>(arg).getHead().getName() == "Table") {
               return std::forward<decltype(arg)>(arg); // Nothing to evaluate
@@ -762,13 +660,8 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
       return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
     } else if(unevaluated.getHead().getName() == "Top" ||
               unevaluated.getHead().getName() == "Order") { // Pipeline breaker
-      bool lastOperationWasJoinTmp = lastOperationWasJoin;
       lastOperationWasJoin = false;
-      if(lastOperationWasJoinTmp) {
-        return vectorizedEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine, false);
-      } else {
-        return vectorizedEvaluate(std::move(unevaluated), wholePipelineEvaluate, true);
-      }
+      return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
     }
     return std::move(unevaluated);
   }
