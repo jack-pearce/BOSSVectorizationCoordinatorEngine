@@ -653,8 +653,16 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
     auto unevaluated =
         ComplexExpression(std::move(head), {}, std::move(evaluatedDynamics), std::move(spans));
     if(unevaluated.getHead().getName() == "Join") { // Pipeline breaker
+      auto result =
+          get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
+      if(get<ComplexExpression>(result.getDynamicArguments()[0]).getHead().getName() == "Table") {
+        // Failed to evaluate the join in the adaptive engine (e.g. multi-key Join not supported)
+        // Therefore batch evaluate it in the fallback engine
+        lastOperationWasJoin = false; // Not adaptiveLib so result can be processed in adaptive eng.
+        return batchEvaluate(std::move(result), pipelineEvaluateExceptFirstEngine);
+      }
       lastOperationWasJoin = true;
-      return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
+      return std::move(result);
     } else if(unevaluated.getHead().getName() == "Group") { // Pipeline breaker
       lastOperationWasJoin = false;
       return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
