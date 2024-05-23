@@ -504,40 +504,33 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
     vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, 0, numBatches, 1, results, 0,
                                    hazardAdaptiveEngineInPipeline);
   } else {
-    ThreadPool::getInstance();
+    auto& pool = ThreadPool::getInstance();
 
     int baselineBatchesPerThread = numBatches / dop;
     int remainingBatches = numBatches % dop;
     int startBatchNum = 0;
     int batchesPerThread;
-    for(auto i = 0; i < dop - 1; ++i) {
-      batchesPerThread = baselineBatchesPerThread + (i < remainingBatches);
+    auto& synchroniser = Synchroniser::getInstance();
+    for(auto i = 0; i < dop; ++i) {
+      if(i < dop - 1) {
+        batchesPerThread = baselineBatchesPerThread + (i < remainingBatches);
+      } else {
+        batchesPerThread = numBatches - startBatchNum;
+      }
 #ifdef DEBUG_MULTI_THREAD
       std::cout << "Thread " << i << " processing " << batchesPerThread
                 << " batches starting from batch " << startBatchNum << std::endl;
 #endif
-      ThreadPool::getInstance().enqueue([&expr, &exprTable, &evaluateFunc, startBatchNum,
-                                         batchesPerThread, dop, &results, i,
-                                         hazardAdaptiveEngineInPipeline]() {
+      pool.enqueue([&synchroniser, &expr, &exprTable, &evaluateFunc, startBatchNum,
+                    batchesPerThread, dop, &results, i, hazardAdaptiveEngineInPipeline]() {
         vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, startBatchNum,
                                        batchesPerThread, dop, results, i,
                                        hazardAdaptiveEngineInPipeline);
+        synchroniser.taskComplete();
       });
       startBatchNum += batchesPerThread;
     }
-    batchesPerThread = numBatches - startBatchNum;
-#ifdef DEBUG_MULTI_THREAD
-    std::cout << "Thread " << (dop - 1) << " processing " << batchesPerThread
-              << " batches starting from batch " << startBatchNum << std::endl;
-#endif
-    ThreadPool::getInstance().enqueue([&expr, &exprTable, &evaluateFunc, startBatchNum,
-                                       batchesPerThread, dop, &results, i = dop - 1,
-                                       hazardAdaptiveEngineInPipeline]() {
-      vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, startBatchNum, batchesPerThread,
-                                     dop, results, i, hazardAdaptiveEngineInPipeline);
-    });
-
-    ThreadPool::getInstance().waitUntilComplete(dop);
+    synchroniser.waitUntilComplete(dop);
   }
   auto result = unionTables(std::move(results));
 #ifdef DEBUG_MODE_VERBOSE
