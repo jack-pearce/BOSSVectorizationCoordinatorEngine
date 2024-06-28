@@ -392,9 +392,9 @@ TEST_CASE("Delegate bootstrapping - join", "[vectorization-engine]") {
     auto intTable2 = "Table"_("O_key"_(createTwoSpansInt(10000, 1)),
                               "O_value"_(createTwoSpansInt(1, 4))); // NOLINT
     auto result =
-        eval("Join"_("Group"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),"Sum"_("L_key"_)),
-                     "Group"_("Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),"Sum"_("O_key"_)),
-                     "Where"_("Equal"_("L_key"_, "O_key"_))));
+        eval("Join"_("Group"_("Select"_(std::move(intTable1), "Where"_("Greater"_(3, "L_key"_))),"As"_("L_key_sum"_,"Sum"_("L_key"_))),
+                     "Group"_("Select"_(std::move(intTable2), "Where"_("Greater"_("O_key"_, 1))),"As"_("O_key_sum"_,"Sum"_("O_key"_))),
+                     "Where"_("Equal"_("L_key_sum"_, "O_key_sum"_))));
 
     CHECK(result == "Table"_());
   }
