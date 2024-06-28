@@ -1,0 +1,6 @@
+/build/
+/build-vs/
+/cmake-build-debug/
+*.patch
+/.idea/
+/.vscode/

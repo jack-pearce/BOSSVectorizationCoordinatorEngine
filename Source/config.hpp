@@ -4,6 +4,7 @@
 namespace vectorization::config {
 
 extern int maxVectorizedDOP;
+extern int minTableLengthForPartitionedHashJoin;
 
 } // namespace vectorization::config
 

@@ -16,7 +16,8 @@
 // #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
-#define FIRST_ENGINE_IS_STORAGE_ENGINE
+#define DEBUG_JOIN_SPECIFIC
+// #define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
 using std::string_literals::operator""s;
@@ -39,12 +40,46 @@ using evaluteInternalFunction = std::function<Expression(ComplexExpression&&)>;
 
 using adaptive::SelectOperatorStates;
 
+using vectorization::config::minTableLengthForPartitionedHashJoin;
+
 namespace utilities {
 auto _false = ComplexExpression("False"_, {}, {}, {});
 }
 
 static ComplexExpression& getTableOrJoinReference(ComplexExpression& e,
                                                   ComplexExpression& _false = utilities::_false);
+
+#ifdef DEBUG_JOIN_SPECIFIC
+namespace utilities {
+static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
+  return std::visit(
+      boss::utilities::overload(
+          [&](boss::ComplexExpression&& e) -> boss::Expression {
+            auto [head, unused_, dynamics, spans] = std::move(e).decompose();
+            boss::ExpressionArguments debugDynamics;
+            debugDynamics.reserve(dynamics.size() + spans.size());
+            std::transform(std::make_move_iterator(dynamics.begin()),
+                           std::make_move_iterator(dynamics.end()),
+                           std::back_inserter(debugDynamics), [](auto&& arg) {
+                             return injectDebugInfoToSpans(std::forward<decltype(arg)>(arg));
+                           });
+            auto numSpans = spans.size();
+            if(numSpans > 0) {
+              auto totalRows = std::accumulate(
+                  spans.begin(), spans.end(), (size_t)0, [](auto total, auto&& span) {
+                    return total +
+                           std::visit([](auto&& typedSpan) -> size_t { return typedSpan.size(); },
+                                      std::forward<decltype(span)>(span));
+                  });
+              debugDynamics.emplace_back("Spans"_((int64_t)numSpans, (int64_t)totalRows));
+            }
+            return boss::ComplexExpression(std::move(head), {}, std::move(debugDynamics), {});
+          },
+          [](auto&& otherTypes) -> boss::Expression { return otherTypes; }),
+      std::move(expr));
+}
+} // namespace utilities
+#endif
 
 #ifdef DEBUG_MODE
 namespace utilities {
@@ -545,6 +580,34 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   return result;
 }
 
+template <typename T> inline int getLengthOfSpans(const ExpressionSpanArguments& spans) {
+  int n = 0;
+  for(auto& untypedSpan : spans) {
+    auto& span = std::get<Span<T>>(untypedSpan);
+    n += span.size();
+  }
+#ifdef DEBUG_JOIN_SPECIFIC
+  std::cout << "Join input table length: " << n << '\n';
+#endif
+  return n;
+}
+
+bool partitionedJoinRequired(const ComplexExpression& expr) {
+  auto getLengthOfTable = [](const ComplexExpression& e) {
+    const ComplexExpression& table = get<ComplexExpression>(e.getDynamicArguments()[0]);
+    const ExpressionSpanArguments& spans =
+        get<ComplexExpression>(table.getArguments().at(0)).getSpanArguments();
+    int n = std::visit(
+        [&spans]<typename T>(const Span<T>& /*span*/) { return getLengthOfSpans<T>(spans); },
+        spans[0]);
+    return n;
+  };
+  int inputTableOneLength = getLengthOfTable(get<ComplexExpression>(expr.getDynamicArguments()[0]));
+  int inputTableTwoLength = getLengthOfTable(get<ComplexExpression>(expr.getDynamicArguments()[1]));
+  return inputTableOneLength > minTableLengthForPartitionedHashJoin &&
+         inputTableTwoLength > minTableLengthForPartitionedHashJoin;
+}
+
 static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc) {
   expr = addParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
 #ifdef DEBUG_MODE_VERBOSE
@@ -646,6 +709,21 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
     auto unevaluated =
         ComplexExpression(std::move(head), {}, std::move(evaluatedDynamics), std::move(spans));
     if(unevaluated.getHead().getName() == "Join") { // Pipeline breaker
+#ifdef DEBUG_JOIN_SPECIFIC
+      std::cout << "Join: "
+                << utilities::injectDebugInfoToSpans(unevaluated.clone(CloneReason::FOR_TESTING))
+                << std::endl;
+#endif
+      if(!partitionedJoinRequired(unevaluated)) { // Evaluate Join in fallback engine
+#ifdef DEBUG_JOIN_SPECIFIC
+        std::cout << "Partition IS NOT required" << std::endl;
+#endif
+        lastOperationWasJoin = false; // Not adaptiveLib so result can be processed in adaptive eng.
+        return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+      }
+#ifdef DEBUG_JOIN_SPECIFIC
+      std::cout << "Partition IS required" << std::endl;
+#endif
       auto result =
           get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
       if(get<ComplexExpression>(result.getDynamicArguments()[0]).getHead().getName() == "Table") {
