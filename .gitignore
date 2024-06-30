@@ -4,3 +4,5 @@
 *.patch
 /.idea/
 /.vscode/
+/RelWithDebInfo/*
+/Sanitize/*
