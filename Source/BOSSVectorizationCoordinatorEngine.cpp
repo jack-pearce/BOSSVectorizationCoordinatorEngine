@@ -16,8 +16,8 @@
 // #define DEBUG_MULTI_THREAD
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
-#define DEBUG_JOIN_SPECIFIC
-// #define FIRST_ENGINE_IS_STORAGE_ENGINE
+// #define DEBUG_JOIN_SPECIFIC
+#define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 
 using std::string_literals::operator""s;
@@ -613,7 +613,7 @@ static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunctio
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "Running batch evaluate of: " << expr << std::endl;
 #endif
-#ifdef DEBUG_MODE
+#if defined(DEBUG_MODE) || defined(DEBUG_JOIN_SPECIFIC)
   std::cout << "Running batch evaluate of: "
             << utilities::injectDebugInfoToSpans(expr.clone(CloneReason::FOR_TESTING)) << std::endl;
 #endif
