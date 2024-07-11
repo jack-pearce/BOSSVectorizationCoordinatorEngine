@@ -3,6 +3,6 @@
 namespace vectorization::config {
 
 int maxVectorizedDOP = 1;
-int minTableLengthForPartitionedHashJoin = 5'000'000;
+int minBuildSideTableLengthForPartitionedHashJoin = 5'000'000;
 
 } // namespace vectorization::config

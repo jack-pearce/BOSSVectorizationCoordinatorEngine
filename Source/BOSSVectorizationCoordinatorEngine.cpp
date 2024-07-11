@@ -19,6 +19,7 @@
 // #define DEBUG_JOIN_SPECIFIC
 #define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
+// #define EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX
 
 using std::string_literals::operator""s;
 using boss::utilities::operator""_;
@@ -40,7 +41,7 @@ using evaluteInternalFunction = std::function<Expression(ComplexExpression&&)>;
 
 using adaptive::SelectOperatorStates;
 
-using vectorization::config::minTableLengthForPartitionedHashJoin;
+using vectorization::config::minBuildSideTableLengthForPartitionedHashJoin;
 
 namespace utilities {
 auto _false = ComplexExpression("False"_, {}, {}, {});
@@ -254,7 +255,8 @@ static ComplexExpression unionTables(ExpressionArguments&& tables) {
  * before the dynamic arg that is being cloned. This would remove the need to update the table
  * position in the super aggregate expression */
 static ComplexExpression cloneExprAndMoveTables(const ComplexExpression& e) {
-  if(e.getHead().getName() == "Table" || e.getHead().getName() == "Join") {
+  if(e.getHead().getName() == "Table" || e.getHead().getName() == "TableIndexed" ||
+     e.getHead().getName() == "Join") {
     return std::move(const_cast<ComplexExpression&>(e));
   }
   auto& dynamics = e.getDynamicArguments();
@@ -293,6 +295,21 @@ static ComplexExpression moveSpansToNewTable(ComplexExpression& exprTable, size_
 static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable, size_t batchNum) {
   if(exprTable.getHead().getName() == "Table") {
     return moveSpansToNewTable(exprTable, batchNum);
+  } else if(exprTable.getHead().getName() == "TableIndexed") {
+    auto dynamics = ExpressionArguments{};
+    dynamics.emplace_back(shallowCopy(get<ComplexExpression>(exprTable.getArguments().at(0))));
+    auto&& span1 = const_cast<ExpressionSpanArgument&&>(std::move(
+        get<ComplexExpression>(exprTable.getArguments().at(1)).getSpanArguments().at(batchNum)));
+    ExpressionSpanArguments spans1{};
+    spans1.emplace_back(std::move(span1));
+    dynamics.emplace_back(ComplexExpression("Indexes"_, {}, {}, std::move(spans1)));
+    dynamics.emplace_back(shallowCopy(get<ComplexExpression>(exprTable.getArguments().at(2))));
+    auto&& span2 = const_cast<ExpressionSpanArgument&&>(std::move(
+        get<ComplexExpression>(exprTable.getArguments().at(3)).getSpanArguments().at(batchNum)));
+    ExpressionSpanArguments spans2{};
+    spans2.emplace_back(std::move(span2));
+    dynamics.emplace_back(ComplexExpression("Indexes"_, {}, {}, std::move(spans2)));
+    return {"TableIndexed"_, {}, std::move(dynamics), {}};
   } else { // "Join"_
     auto destDynamics = ExpressionArguments{};
 #ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
@@ -301,14 +318,7 @@ static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable,
       auto dynamics = ExpressionArguments{};
       dynamics.emplace_back(
           shallowCopy(get<ComplexExpression>(radixPartitionExpr.getArguments().at(0))));
-      dynamics.emplace_back(
-          get<ComplexExpression>(radixPartitionExpr.getArguments().at(1 + batchNum))
-              .getArguments()
-              .at(0));
-      dynamics.emplace_back(
-          get<ComplexExpression>(radixPartitionExpr.getArguments().at(1 + batchNum))
-              .getArguments()
-              .at(1));
+      dynamics.emplace_back(radixPartitionExpr.getArguments().at(1 + batchNum));
       return {"RadixPartition"_, {}, std::move(dynamics), {}};
     };
     destDynamics.emplace_back(shallowCopyTableAndMovePartition(
@@ -327,15 +337,16 @@ static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable,
   }
 }
 
-static ComplexExpression& getTableOrJoinReference(ComplexExpression& e, // NOLINT
-                                                  ComplexExpression& _false) {
-  if(e.getHead().getName() == "Table" || e.getHead().getName() == "Join")
+static ComplexExpression& getTableOrJoinReference(ComplexExpression& e, ComplexExpression& _false) {
+  if(e.getHead().getName() == "Table" || e.getHead().getName() == "TableIndexed" ||
+     e.getHead().getName() == "Join")
     return e;
   auto [head, unused_, dynamics, spans] = std::move(e).decompose();
   for(auto& dynamic : dynamics) {
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
       auto& result = getTableOrJoinReference(get<ComplexExpression>(dynamic), _false);
-      if(result.getHead().getName() == "Table" || result.getHead().getName() == "Join") {
+      if(result.getHead().getName() == "Table" || result.getHead().getName() == "TableIndexed" ||
+         result.getHead().getName() == "Join") {
         e = ComplexExpression(std::move(head), {}, std::move(dynamics), std::move(spans));
         return result;
       }
@@ -352,6 +363,10 @@ static int getNumBatchesInTableOrJoinReference(ComplexExpression& e) {
             get<ComplexExpression>(e.getDynamicArguments().at(0)).getDynamicArguments().at(0))
             .getSpanArguments()
             .size());
+  }
+  if(e.getHead().getName() == "TableIndexed") {
+    return static_cast<int>(
+        get<ComplexExpression>(e.getDynamicArguments().at(1)).getSpanArguments().size());
   }
   return static_cast<int>(
              get<ComplexExpression>(e.getDynamicArguments().at(0)).getArguments().size()) -
@@ -385,6 +400,8 @@ static ComplexExpression generateSubExpressionClone(const ComplexExpression& e) 
     if(std::holds_alternative<ComplexExpression>(dynamic)) {
       if(get<ComplexExpression>(dynamic).getHead().getName() == "Table") {
         copiedDynamics.push_back(ComplexExpression("Table"_, {}, {}, {}));
+      } else if(get<ComplexExpression>(dynamic).getHead().getName() == "TableIndexed") {
+        copiedDynamics.push_back(ComplexExpression("TableIndexed"_, {}, {}, {}));
       } else if(get<ComplexExpression>(dynamic).getHead().getName() == "Join") {
         copiedDynamics.push_back(ComplexExpression("Join"_, {}, {}, {}));
       } else if(get<ComplexExpression>(dynamic).getHead() == "DateObject"_) {
@@ -474,7 +491,9 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
 #endif
   ExpressionArguments results;
   for(int batchNum = startBatch; batchNum < startBatch + numBatches; ++batchNum) {
+    // Move batchNum'th span into the subExprMasterTable within subExprMaster
     subExprMasterTable = moveSpansToNewTableOrJoin(exprTable, batchNum);
+    // clone the master expression and move the tables into a new expression to evaluate
     auto subExpr = cloneExprAndMoveTables(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "SubExpr #" << batchNum << ":         " << subExpr << std::endl;
@@ -524,9 +543,11 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   if(numBatches == 0) {
     if(exprTable.getHead().getName() == "Table") {
       return std::move(exprTable);
-    } else {
-      return "Table"_();
     }
+    if(exprTable.getHead().getName() == "TableIndexed") {
+      return evaluateFunc(std::move(expr));
+    }
+    return "Table"_();
   }
 
   int dop = std::min(numBatches, vectorization::config::maxVectorizedDOP);
@@ -587,25 +608,20 @@ template <typename T> inline int getLengthOfSpans(const ExpressionSpanArguments&
     n += span.size();
   }
 #ifdef DEBUG_JOIN_SPECIFIC
-  std::cout << "Join input table length: " << n << '\n';
+  std::cout << "Join input table length on build side: " << n << std::endl;
 #endif
   return n;
 }
 
 bool partitionedJoinRequired(const ComplexExpression& expr) {
-  auto getLengthOfTable = [](const ComplexExpression& e) {
-    const ComplexExpression& table = get<ComplexExpression>(e.getDynamicArguments()[0]);
-    const ExpressionSpanArguments& spans =
-        get<ComplexExpression>(table.getArguments().at(0)).getSpanArguments();
-    int n = std::visit(
-        [&spans]<typename T>(const Span<T>& /*span*/) { return getLengthOfSpans<T>(spans); },
-        spans[0]);
-    return n;
-  };
-  int inputTableOneLength = getLengthOfTable(get<ComplexExpression>(expr.getDynamicArguments()[0]));
-  int inputTableTwoLength = getLengthOfTable(get<ComplexExpression>(expr.getDynamicArguments()[1]));
-  return inputTableOneLength > minTableLengthForPartitionedHashJoin &&
-         inputTableTwoLength > minTableLengthForPartitionedHashJoin;
+  const ComplexExpression& buildSide = get<ComplexExpression>(expr.getDynamicArguments()[0]);
+  const ComplexExpression& table = get<ComplexExpression>(buildSide.getDynamicArguments()[0]);
+  const ExpressionSpanArguments& spans =
+      get<ComplexExpression>(table.getArguments().at(0)).getSpanArguments();
+  int n = std::visit(
+      [&spans]<typename T>(const Span<T>& /*span*/) { return getLengthOfSpans<T>(spans); },
+      spans[0]);
+  return n > minBuildSideTableLengthForPartitionedHashJoin;
 }
 
 static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc) {
@@ -634,15 +650,14 @@ void freeBOSSExpression(BOSSExpression* expression) {
 
 static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wholePipelineEvaluate,
                                      evaluteInternalFunction& firstEngineEvaluate,
-                                     evaluteInternalFunction& pipelineEvaluateExceptFirstEngine,
-                                     bool& lastOperationWasJoin) {
+                                     evaluteInternalFunction& pipelineEvaluateExceptFirstEngine) {
   if(std::holds_alternative<ComplexExpression>(e) &&
      get<ComplexExpression>(e).getHead().getName() != "Table") { // Need to evaluate, perform DFS
     auto [head, unused_, dynamics, spans] = get<ComplexExpression>(std::move(e)).decompose();
     ExpressionArguments evaluatedDynamics;
     evaluatedDynamics.reserve(dynamics.size());
     // Special case for Join: Double evaluate branches (1st to evaluate any pipeline
-    // breakers, 2nd to evaluate expression with correct lastOperationWasJoin value)
+    // breakers, 2nd to evaluate any remaining expression)
     if(head.getName() == "Join") {
       int index = 0;
       std::transform(
@@ -654,20 +669,14 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
             if(get<ComplexExpression>(arg).getHead().getName() == "Table") {
               return std::forward<decltype(arg)>(arg); // Nothing to evaluate
             }
-            lastOperationWasJoin = false;
             auto evaluatedArg = evaluateDispatcher( // Evaluate any pipeline breakers if present
                 std::forward<decltype(arg)>(arg), wholePipelineEvaluate, firstEngineEvaluate,
-                pipelineEvaluateExceptFirstEngine, lastOperationWasJoin);
+                pipelineEvaluateExceptFirstEngine);
             if(get<ComplexExpression>(evaluatedArg).getHead().getName() == "Table") {
               return std::move(evaluatedArg); // Nothing to evaluate
             }
-            if(lastOperationWasJoin) { // Contained a join so omit first engine
-              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        pipelineEvaluateExceptFirstEngine, false);
-            } else { // Evaluate remaining pipeline-able expression
-              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        wholePipelineEvaluate, true);
-            }
+            return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
+                                      wholePipelineEvaluate, true);
           });
       // Special case for Group, Top, Order: Double evaluate table expr (1st to evaluate any
       // pipeline breakers, 2nd to evaluate any remaining expression)
@@ -682,28 +691,21 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
             if(get<ComplexExpression>(arg).getHead().getName() == "Table") {
               return std::forward<decltype(arg)>(arg); // Nothing to evaluate
             }
-            lastOperationWasJoin = false;
             auto evaluatedArg = evaluateDispatcher( // Evaluate any pipeline breakers if present
                 std::forward<decltype(arg)>(arg), wholePipelineEvaluate, firstEngineEvaluate,
-                pipelineEvaluateExceptFirstEngine, lastOperationWasJoin);
+                pipelineEvaluateExceptFirstEngine);
             if(get<ComplexExpression>(evaluatedArg).getHead().getName() == "Table") {
               return std::move(evaluatedArg); // Nothing to evaluate
             }
-            if(lastOperationWasJoin) { // Contained a join so omit first engine
-              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        pipelineEvaluateExceptFirstEngine, false);
-            } else { // Evaluate remaining pipeline-able expression
-              return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                        wholePipelineEvaluate, true);
-            }
+            return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
+                                      wholePipelineEvaluate, true);
           });
     } else { // Continue DFS as normal
       std::transform(
           std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
           std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
             return evaluateDispatcher(std::forward<decltype(arg)>(arg), wholePipelineEvaluate,
-                                      firstEngineEvaluate, pipelineEvaluateExceptFirstEngine,
-                                      lastOperationWasJoin);
+                                      firstEngineEvaluate, pipelineEvaluateExceptFirstEngine);
           });
     }
     auto unevaluated =
@@ -713,33 +715,38 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
       std::cout << "Join: "
                 << utilities::injectDebugInfoToSpans(unevaluated.clone(CloneReason::FOR_TESTING))
                 << std::endl;
+      std::cout << "Partition " << (partitionedJoinRequired(unevaluated) ? "IS" : "IS NOT")
+                << " required" << std::endl;
 #endif
-      if(!partitionedJoinRequired(unevaluated)) { // Evaluate Join in fallback engine
-#ifdef DEBUG_JOIN_SPECIFIC
-        std::cout << "Partition IS NOT required" << std::endl;
-#endif
-        lastOperationWasJoin = false; // Not adaptiveLib so result can be processed in adaptive eng.
-        return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+      if(partitionedJoinRequired(unevaluated)) {
+        auto [head, unused_, dynamics, spans] = std::move(unevaluated).decompose();
+        unevaluated =
+            ComplexExpression(Symbol("PartitionedJoin"), {}, std::move(dynamics), std::move(spans));
+        auto result =
+            get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
+        if(result.getHead().getName() == "Join") {
+          return std::move(result);
+        } else { // Could not evaluate in hazardAdaptiveLib (e.g. multi-key Join), evaluate in Velox
+          auto [head, unused_, dynamics, spans] = std::move(unevaluated).decompose();
+          unevaluated =
+              ComplexExpression(Symbol("Join"), {}, std::move(dynamics), std::move(spans));
+          return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+        }
       }
-#ifdef DEBUG_JOIN_SPECIFIC
-      std::cout << "Partition IS required" << std::endl;
-#endif
+#ifdef EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX // Batch evaluate in Velox
+      return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+#else // Batch evaluate in hazard adaptive engine
       auto result =
           get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
-      if(get<ComplexExpression>(result.getDynamicArguments()[0]).getHead().getName() == "Table") {
-        // Failed to evaluate the join in the adaptive engine (e.g. multi-key Join not supported)
-        // Therefore batch evaluate it in the fallback engine
-        lastOperationWasJoin = false; // Not adaptiveLib so result can be processed in adaptive eng.
-        return batchEvaluate(std::move(result), pipelineEvaluateExceptFirstEngine);
+      if(result.getHead().getName() == "Join") { // Hazard adaptive engine could not evaluate
+        return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
       }
-      lastOperationWasJoin = true;
       return std::move(result);
+#endif
     } else if(unevaluated.getHead().getName() == "Group") { // Pipeline breaker
-      lastOperationWasJoin = false;
       return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
     } else if(unevaluated.getHead().getName() == "Top" ||
               unevaluated.getHead().getName() == "Order") { // Pipeline breaker
-      lastOperationWasJoin = false;
       return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
     }
     return std::move(unevaluated);
@@ -809,13 +816,12 @@ static Expression evaluateInternal(Expression&& e) {
       return result;
     };
 
-    bool lastOperationWasJoin = false;
     bool finalEvaluateRequired =
         !(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
           expr.getHead().getName() == "Order");
-    auto result = get<ComplexExpression>(
-        evaluateDispatcher(std::move(expr), wholePipelineEvaluate, firstEngineEvaluate,
-                           pipelineEvaluateExceptFirstEngine, lastOperationWasJoin));
+    auto result = get<ComplexExpression>(evaluateDispatcher(std::move(expr), wholePipelineEvaluate,
+                                                            firstEngineEvaluate,
+                                                            pipelineEvaluateExceptFirstEngine));
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "Result after all pipeline breakers evaluated: " << result << std::endl;
 #endif
@@ -825,11 +831,8 @@ static Expression evaluateInternal(Expression&& e) {
               << std::endl;
 #endif
 
-    if(!finalEvaluateRequired) { // Final evaluation not required if root was a Group or Top
+    if(!finalEvaluateRequired) { // Final evaluation not required if root was a Group, Top, or Order
       return result;
-    }
-    if(lastOperationWasJoin) {
-      return vectorizedEvaluate(std::move(result), pipelineEvaluateExceptFirstEngine, false);
     }
     return vectorizedEvaluate(std::move(result), wholePipelineEvaluate, true);
   };
