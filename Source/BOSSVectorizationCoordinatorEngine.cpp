@@ -17,6 +17,8 @@
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
 // #define DEBUG_JOIN_SPECIFIC
+// #define DEBUG_EXPR_SENT_TO_LAST_ENGINE
+
 #define FIRST_ENGINE_IS_STORAGE_ENGINE
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 // #define EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX
@@ -50,20 +52,20 @@ auto _false = ComplexExpression("False"_, {}, {}, {});
 static ComplexExpression& getTableOrJoinReference(ComplexExpression& e,
                                                   ComplexExpression& _false = utilities::_false);
 
-#ifdef DEBUG_JOIN_SPECIFIC
+#if defined(DEBUG_MODE) || defined(DEBUG_JOIN_SPECIFIC) || defined(DEBUG_EXPR_SENT_TO_LAST_ENGINE)
 namespace utilities {
-static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
+static boss::Expression injectDebugInfoToSpansNumSpans(boss::Expression&& expr) {
   return std::visit(
       boss::utilities::overload(
           [&](boss::ComplexExpression&& e) -> boss::Expression {
             auto [head, unused_, dynamics, spans] = std::move(e).decompose();
             boss::ExpressionArguments debugDynamics;
             debugDynamics.reserve(dynamics.size() + spans.size());
-            std::transform(std::make_move_iterator(dynamics.begin()),
-                           std::make_move_iterator(dynamics.end()),
-                           std::back_inserter(debugDynamics), [](auto&& arg) {
-                             return injectDebugInfoToSpans(std::forward<decltype(arg)>(arg));
-                           });
+            std::transform(
+                std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
+                std::back_inserter(debugDynamics), [](auto&& arg) {
+                  return injectDebugInfoToSpansNumSpans(std::forward<decltype(arg)>(arg));
+                });
             auto numSpans = spans.size();
             if(numSpans > 0) {
               auto totalRows = std::accumulate(
@@ -79,11 +81,7 @@ static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
           [](auto&& otherTypes) -> boss::Expression { return otherTypes; }),
       std::move(expr));
 }
-} // namespace utilities
-#endif
 
-#ifdef DEBUG_MODE
-namespace utilities {
 static boss::Expression injectDebugInfoToSpans(boss::Expression&& expr) {
   return std::visit(
       boss::utilities::overload(
@@ -631,7 +629,8 @@ static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunctio
 #endif
 #if defined(DEBUG_MODE) || defined(DEBUG_JOIN_SPECIFIC)
   std::cout << "Running batch evaluate of: "
-            << utilities::injectDebugInfoToSpans(expr.clone(CloneReason::FOR_TESTING)) << std::endl;
+            << utilities::injectDebugInfoToSpansNumSpans(expr.clone(CloneReason::FOR_TESTING))
+            << std::endl;
 #endif
   return evaluateFunc(std::move(expr));
 }
@@ -713,7 +712,8 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
     if(unevaluated.getHead().getName() == "Join") { // Pipeline breaker
 #ifdef DEBUG_JOIN_SPECIFIC
       std::cout << "Join: "
-                << utilities::injectDebugInfoToSpans(unevaluated.clone(CloneReason::FOR_TESTING))
+                << utilities::injectDebugInfoToSpansNumSpans(
+                       unevaluated.clone(CloneReason::FOR_TESTING))
                 << std::endl;
       std::cout << "Partition " << (partitionedJoinRequired(unevaluated) ? "IS" : "IS NOT")
                 << " required" << std::endl;
@@ -727,7 +727,7 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
         if(result.getHead().getName() == "Join") {
           return std::move(result);
         } else { // Could not evaluate in hazardAdaptiveLib (e.g. multi-key Join), evaluate in Velox
-          auto [head, unused_, dynamics, spans] = std::move(unevaluated).decompose();
+          auto [head, unused_, dynamics, spans] = std::move(result).decompose();
           unevaluated =
               ComplexExpression(Symbol("Join"), {}, std::move(dynamics), std::move(spans));
           return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
@@ -738,7 +738,7 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
 #else // Batch evaluate in hazard adaptive engine
       auto result =
           get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
-      if(result.getHead().getName() == "Join") { // Hazard adaptive engine could not evaluate
+      if(result.getHead().getName() == "Join") { // Hazard adaptive engine failed to evaluate
         return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
       }
       return std::move(result);
@@ -782,11 +782,30 @@ static Expression evaluateInternal(Expression&& e) {
     evaluteInternalFunction wholePipelineEvaluate =
         [&engines](ComplexExpression&& e) -> Expression {
       auto* r = new BOSSExpression{std::move(e)};
+#ifdef DEBUG_EXPR_SENT_TO_LAST_ENGINE
+      size_t index = 0;
+      size_t totalEngines = engines.size();
+      for(auto engine : engines) {
+        auto* oldWrapper = r;
+        if(index++ == totalEngines - 1) {
+          Expression expr = std::move(r->delegate);
+          std::cout << "Last engine input expression: "
+                    << utilities::injectDebugInfoToSpansNumSpans(
+                           expr.clone(CloneReason::FOR_TESTING))
+                    << '\n'
+                    << std::endl;
+          r = new BOSSExpression{std::move(expr)};
+        }
+        r = engine(r);
+        freeBOSSExpression(oldWrapper);
+      }
+#else
       for(auto engine : engines) {
         auto* oldWrapper = r;
         r = engine(r);
         freeBOSSExpression(oldWrapper);
       }
+#endif
       auto result = std::move(r->delegate);
       freeBOSSExpression(r);
       return result;
@@ -808,6 +827,18 @@ static Expression evaluateInternal(Expression&& e) {
       auto engineIterator = std::next(engines.begin());
       for(; engineIterator != engines.end(); ++engineIterator) {
         auto* oldWrapper = r;
+#ifdef DEBUG_EXPR_SENT_TO_LAST_ENGINE
+        if(engineIterator == std::prev(engines.end())) {
+          Expression expr = std::move(r->delegate);
+          std::cout << "Last engine input expression: "
+                    << utilities::injectDebugInfoToSpansNumSpans(
+                           expr.clone(CloneReason::FOR_TESTING))
+                    << '\n'
+                    << std::endl;
+          r = new BOSSExpression{std::move(expr)};
+        }
+
+#endif
         r = (*engineIterator)(r);
         freeBOSSExpression(oldWrapper);
       }
