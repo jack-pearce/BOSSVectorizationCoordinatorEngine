@@ -44,11 +44,11 @@ set(CMAKE_SHARED_LINKER_FLAGS_DEBUG
         FORCE)
 
 # Release build type
-set(CMAKE_CXX_FLAGS_RELEASE "${COMMON_FLAGS} -O3 -g"
+set(CMAKE_CXX_FLAGS_RELEASE "${COMMON_FLAGS} -O3 -g0"
         CACHE STRING
         "Flags used by the C++ compiler during Release builds."
         FORCE)
-set(CMAKE_C_FLAGS_RELEASE "${COMMON_FLAGS} -O3 -g"
+set(CMAKE_C_FLAGS_RELEASE "${COMMON_FLAGS} -O3 -g0"
         CACHE STRING
         "Flags used by the C compiler during Release builds."
         FORCE)
@@ -113,7 +113,7 @@ include(ExternalProject)
     set(BOSS_SOURCE_REPOSITORY https://little-big-h:${GITHUB_TOKEN}@github.com/symbol-store/BOSS.git)
   endif()
   if(NOT DEFINED BOSS_SOURCE_BRANCH)
-    set(BOSS_SOURCE_BRANCH main)
+    set(BOSS_SOURCE_BRANCH bootstrap_load_partition)
   endif()
   message("getting boss sources from ${BOSS_SOURCE_REPOSITORY}, branch ${BOSS_SOURCE_BRANCH}")
   ExternalProject_Add(BOSS
@@ -144,8 +144,7 @@ endif(MSVC)
 set(ImplementationFiles
         Source/BOSSVectorizationCoordinatorEngine.cpp
         Source/config.cpp
-        /home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
-        # /repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
+        ../BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.cpp
 )
 
 add_library(BOSSVectorizationCoordinatorEngine MODULE ${ImplementationFiles})
