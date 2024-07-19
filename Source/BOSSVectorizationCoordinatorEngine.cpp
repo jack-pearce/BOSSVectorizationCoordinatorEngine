@@ -23,6 +23,8 @@
 #define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
 // #define EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX
 
+// #define LOGGING
+
 using std::string_literals::operator""s;
 using boss::utilities::operator""_;
 
@@ -756,6 +758,21 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
 
 static Expression evaluateInternal(Expression&& e) {
   return std::move(e) | [](ComplexExpression&& e) -> Expression {
+    if(e.getHead().getName() == "Set") {
+      auto param = std::get<Symbol>(e.getDynamicArguments()[0]);
+      if(param == "maxThreads"_) {
+        vectorization::config::maxVectorizedDOP =
+            std::holds_alternative<int32_t>(e.getDynamicArguments()[1])
+                ? std::get<int32_t>(e.getDynamicArguments()[1])
+                : std::get<int64_t>(e.getDynamicArguments()[1]);
+#ifdef LOGGING
+        std::cout << "Number of threads in vectorization coordinator engine set to "
+                  << vectorization::config::maxVectorizedDOP << std::endl;
+#endif
+        return true;
+      }
+      throw std::runtime_error("Unknown Set parameter: " + param.getName());
+    }
     if(e.getHead().getName() != "EvaluateInEngines")
       throw std::runtime_error("Expression does not start with 'EvaluateInEngines'");
     auto [head, unused_, dynamics, spans] = std::move(e).decompose();
