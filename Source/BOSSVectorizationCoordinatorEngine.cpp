@@ -14,6 +14,7 @@
 #include "memoryPool.hpp"
 
 // #define DEBUG_MULTI_THREAD
+// #define DEBUG_MODE_MIN
 // #define DEBUG_MODE
 // #define DEBUG_MODE_VERBOSE
 // #define DEBUG_JOIN_SPECIFIC
@@ -53,6 +54,23 @@ auto _false = ComplexExpression("False"_, {}, {}, {});
 
 static ComplexExpression& getTableOrJoinReference(ComplexExpression& e,
                                                   ComplexExpression& _false = utilities::_false);
+
+#ifdef DEBUG_MODE_MIN
+namespace utilities {
+static void printExpr(const ComplexExpression& expr) {
+  if(expr.getHead().getName() == "List") {
+    return;
+  }
+  std::cout << expr.getHead().getName() << "_(";
+  for(size_t i = 0; i < expr.getDynamicArguments().size(); i++) {
+    std::visit(boss::utilities::overload([&](const ComplexExpression& e) { printExpr(e); },
+                                         [](const auto& otherTypes) { std::cout << otherTypes; }),
+               expr.getDynamicArguments().at(i));
+    std::cout << ")";
+  }
+}
+} // namespace utilities
+#endif
 
 #if defined(DEBUG_MODE) || defined(DEBUG_JOIN_SPECIFIC) || defined(DEBUG_EXPR_SENT_TO_LAST_ENGINE)
 namespace utilities {
@@ -533,6 +551,12 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
 static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc,
                                      bool hazardAdaptiveEngineInPipeline) {
   auto expr = std::move(e);
+#ifdef DEBUG_MODE_MIN
+  const ComplexExpression& exprRef = expr;
+  std::cout << "VECTORIZED EVALUATE: ";
+  utilities::printExpr(exprRef);
+  std::cout << std::endl;
+#endif
   auto& exprTable = getTableOrJoinReference(expr);
   if(exprTable == utilities::_false)
     return evaluateFunc(std::move(expr));
@@ -626,6 +650,12 @@ bool partitionedJoinRequired(const ComplexExpression& expr) {
 
 static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc) {
   expr = addParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
+#ifdef DEBUG_MODE_MIN
+  const ComplexExpression& exprRef = expr;
+  std::cout << "BATCH EVALUATE: ";
+  utilities::printExpr(exprRef);
+  std::cout << std::endl;
+#endif
 #ifdef DEBUG_MODE_VERBOSE
   std::cout << "Running batch evaluate of: " << expr << std::endl;
 #endif
