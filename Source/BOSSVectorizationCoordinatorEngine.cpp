@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 
 #include "/home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 // #include "/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
@@ -20,13 +21,12 @@
 // #define DEBUG_JOIN_SPECIFIC
 // #define DEBUG_EXPR_SENT_TO_LAST_ENGINE
 
-#define FIRST_ENGINE_IS_STORAGE_ENGINE
-#define HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
+#define FIRST_ENGINE_IS_STORAGE_ENGINE // Turn off when running Tests
 // #define EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX
 
 // #define LOGGING
 
-using std::string_literals::operator""s;
+using std::string_literals::operator""s; // NOLINT
 using boss::utilities::operator""_;
 
 using boss::ComplexExpression;
@@ -220,6 +220,14 @@ static ComplexExpression addParallelInformation(ComplexExpression&& expr, int ve
   return {"Let"_, {}, std::move(letArgs), {}};
 }
 
+static ComplexExpression addBatchedParallelInformation(ComplexExpression&& expr,
+                                                       int vectorizedDOP) {
+  auto letArgs = ExpressionArguments(std::move(expr));
+  letArgs.emplace_back(
+      ComplexExpression("Parallel_Batched"_, {}, ExpressionArguments(vectorizedDOP), {}));
+  return {"Let"_, {}, std::move(letArgs), {}};
+}
+
 static ComplexExpression addStatsInformation(ComplexExpression&& expr,
                                              SelectOperatorStates* statesPtr) {
   auto letArgs = ExpressionArguments(std::move(expr));
@@ -330,7 +338,6 @@ static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable,
     return {"TableIndexed"_, {}, std::move(dynamics), {}};
   } else { // "Join"_
     auto destDynamics = ExpressionArguments{};
-#ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
     auto shallowCopyTableAndMovePartition = [](ComplexExpression& radixPartitionExpr,
                                                size_t batchNum) -> ComplexExpression {
       auto dynamics = ExpressionArguments{};
@@ -343,12 +350,6 @@ static ComplexExpression moveSpansToNewTableOrJoin(ComplexExpression& exprTable,
         get<ComplexExpression>(exprTable.getArguments().at(0)), batchNum));
     destDynamics.emplace_back(shallowCopyTableAndMovePartition(
         get<ComplexExpression>(exprTable.getArguments().at(1)), batchNum));
-#else
-    destDynamics.emplace_back(
-        moveSpansToNewTable(get<ComplexExpression>(exprTable.getArguments().at(0)), batchNum));
-    destDynamics.emplace_back(
-        moveSpansToNewTable(get<ComplexExpression>(exprTable.getArguments().at(1)), batchNum));
-#endif
     destDynamics.emplace_back(get<ComplexExpression>(exprTable.getArguments().at(2))
                                   .clone(CloneReason::EVALUATE_CONST_EXPRESSION));
     return {"Join"_, {}, std::move(destDynamics), {}};
@@ -451,39 +452,34 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
                                            ComplexExpression& exprTable,
                                            evaluteInternalFunction& evaluateFunc, int startBatch,
                                            int numBatches, int vectorizedDOP,
-                                           ExpressionArguments& outputVector, int outputIndex,
-                                           bool hazardAdaptiveEngineInPipeline) {
+                                           ExpressionArguments& outputVector, int outputIndex) {
   auto subExprMaster = generateSubExpressionClone(expr);
-#ifdef HAZARD_ADAPTIVE_ENGINE_IN_PIPELINE
   auto stats = std::optional<StatsRaiiWrapper>(std::nullopt);
-  if(hazardAdaptiveEngineInPipeline) {
 #ifdef DEBUG_MODE_VERBOSE
-    std::cout << "SubExprMaster before preparing: " << subExprMaster << std::endl;
+  std::cout << "SubExprMaster before preparing: " << subExprMaster << std::endl;
 #endif
 #ifdef DEBUG_MODE
-    std::cout << "SubExprMaster before preparing: "
-              << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
-              << std::endl;
+  std::cout << "SubExprMaster before preparing: "
+            << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
+            << std::endl;
 #endif
-    subExprMaster = addParallelInformation(std::move(subExprMaster), vectorizedDOP);
-    int predicateCount = 0;
-    subExprMaster = addIdToPredicates(std::move(subExprMaster), predicateCount);
+  int predicateCount = 0;
+  subExprMaster = addIdToPredicates(std::move(subExprMaster), predicateCount);
 #if defined(DEBUG_MODE) || defined(DEBUG_MODE_VERBOSE)
-    std::cout << "Identified " << predicateCount << " predicates" << std::endl;
+  std::cout << "Identified " << predicateCount << " predicates" << std::endl;
 #endif
-    if(predicateCount > 0) {
-      stats.emplace(predicateCount);
-      subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
-    }
+  if(predicateCount > 0) {
+    stats.emplace(predicateCount);
+    subExprMaster = addStatsInformation(std::move(subExprMaster), stats.value().getStates());
+  }
+  subExprMaster = addParallelInformation(std::move(subExprMaster), vectorizedDOP);
 #ifdef DEBUG_MODE_VERBOSE
-    std::cout << "SubExprMaster after preparing:  " << subExprMaster << std::endl;
+  std::cout << "SubExprMaster after preparing:  " << subExprMaster << std::endl;
 #endif
 #ifdef DEBUG_MODE
-    std::cout << "SubExprMaster after preparing:  "
-              << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
-              << std::endl;
-#endif
-  }
+  std::cout << "SubExprMaster after preparing:  "
+            << utilities::injectDebugInfoToSpans(subExprMaster.clone(CloneReason::FOR_TESTING))
+            << std::endl;
 #endif
   auto& subExprMasterTable = getTableOrJoinReference(subExprMaster);
 #ifdef DEBUG_MODE_VERBOSE
@@ -548,8 +544,7 @@ static void vectorizedEvaluateSingleThread(const ComplexExpression& expr,
   outputVector[outputIndex] = std::move(result);
 }
 
-static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc,
-                                     bool hazardAdaptiveEngineInPipeline) {
+static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunction& evaluateFunc) {
   auto expr = std::move(e);
 #ifdef DEBUG_MODE_MIN
   const ComplexExpression& exprRef = expr;
@@ -581,8 +576,7 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
   std::cout << "Using " << dop << " degrees of parallelism" << std::endl;
 #endif
   if(dop == 1) {
-    vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, 0, numBatches, 1, results, 0,
-                                   hazardAdaptiveEngineInPipeline);
+    vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, 0, numBatches, 1, results, 0);
   } else {
     auto& pool = ThreadPool::getInstance();
 
@@ -602,10 +596,9 @@ static Expression vectorizedEvaluate(ComplexExpression&& e, evaluteInternalFunct
                 << " batches starting from batch " << startBatchNum << std::endl;
 #endif
       pool.enqueue([&synchroniser, &expr, &exprTable, &evaluateFunc, startBatchNum,
-                    batchesPerThread, dop, &results, i, hazardAdaptiveEngineInPipeline]() {
+                    batchesPerThread, dop, &results, i]() {
         vectorizedEvaluateSingleThread(expr, exprTable, evaluateFunc, startBatchNum,
-                                       batchesPerThread, dop, results, i,
-                                       hazardAdaptiveEngineInPipeline);
+                                       batchesPerThread, dop, results, i);
         synchroniser.taskComplete();
       });
       startBatchNum += batchesPerThread;
@@ -648,8 +641,13 @@ bool partitionedJoinRequired(const ComplexExpression& expr) {
   return n > minBuildSideTableLengthForPartitionedHashJoin;
 }
 
-static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc) {
-  expr = addParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
+static Expression batchEvaluate(ComplexExpression&& expr, evaluteInternalFunction& evaluateFunc,
+                                bool nonAdaptiveEngine) {
+  if(nonAdaptiveEngine) {
+    expr = addBatchedParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
+  } else {
+    expr = addParallelInformation(std::move(expr), vectorization::config::maxVectorizedDOP);
+  }
 #ifdef DEBUG_MODE_MIN
   const ComplexExpression& exprRef = expr;
   std::cout << "BATCH EVALUATE: ";
@@ -680,8 +678,9 @@ void freeBOSSExpression(BOSSExpression* expression) {
 /*****************************************************************************************/
 
 static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wholePipelineEvaluate,
-                                     evaluteInternalFunction& firstEngineEvaluate,
-                                     evaluteInternalFunction& pipelineEvaluateExceptFirstEngine) {
+                                     evaluteInternalFunction& nonAdaptiveEngineEvaluate,
+                                     evaluteInternalFunction& adaptiveEngineEvaluate,
+                                     evaluteInternalFunction& veloxEngineEvaluate) {
   if(std::holds_alternative<ComplexExpression>(e) &&
      get<ComplexExpression>(e).getHead().getName() != "Table") { // Need to evaluate, perform DFS
     auto [head, unused_, dynamics, spans] = get<ComplexExpression>(std::move(e)).decompose();
@@ -701,13 +700,13 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
               return std::forward<decltype(arg)>(arg); // Nothing to evaluate
             }
             auto evaluatedArg = evaluateDispatcher( // Evaluate any pipeline breakers if present
-                std::forward<decltype(arg)>(arg), wholePipelineEvaluate, firstEngineEvaluate,
-                pipelineEvaluateExceptFirstEngine);
+                std::forward<decltype(arg)>(arg), wholePipelineEvaluate, nonAdaptiveEngineEvaluate,
+                adaptiveEngineEvaluate, veloxEngineEvaluate);
             if(get<ComplexExpression>(evaluatedArg).getHead().getName() == "Table") {
               return std::move(evaluatedArg); // Nothing to evaluate
             }
             return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                      wholePipelineEvaluate, true);
+                                      wholePipelineEvaluate);
           });
       // Special case for Group, Top, Order: Double evaluate table expr (1st to evaluate any
       // pipeline breakers, 2nd to evaluate any remaining expression)
@@ -723,21 +722,22 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
               return std::forward<decltype(arg)>(arg); // Nothing to evaluate
             }
             auto evaluatedArg = evaluateDispatcher( // Evaluate any pipeline breakers if present
-                std::forward<decltype(arg)>(arg), wholePipelineEvaluate, firstEngineEvaluate,
-                pipelineEvaluateExceptFirstEngine);
+                std::forward<decltype(arg)>(arg), wholePipelineEvaluate, nonAdaptiveEngineEvaluate,
+                adaptiveEngineEvaluate, veloxEngineEvaluate);
             if(get<ComplexExpression>(evaluatedArg).getHead().getName() == "Table") {
               return std::move(evaluatedArg); // Nothing to evaluate
             }
             return vectorizedEvaluate(std::move(get<ComplexExpression>(evaluatedArg)),
-                                      wholePipelineEvaluate, true);
+                                      wholePipelineEvaluate);
           });
     } else { // Continue DFS as normal
-      std::transform(
-          std::make_move_iterator(dynamics.begin()), std::make_move_iterator(dynamics.end()),
-          std::back_inserter(evaluatedDynamics), [&](auto&& arg) {
-            return evaluateDispatcher(std::forward<decltype(arg)>(arg), wholePipelineEvaluate,
-                                      firstEngineEvaluate, pipelineEvaluateExceptFirstEngine);
-          });
+      std::transform(std::make_move_iterator(dynamics.begin()),
+                     std::make_move_iterator(dynamics.end()), std::back_inserter(evaluatedDynamics),
+                     [&](auto&& arg) {
+                       return evaluateDispatcher(std::forward<decltype(arg)>(arg),
+                                                 wholePipelineEvaluate, nonAdaptiveEngineEvaluate,
+                                                 adaptiveEngineEvaluate, veloxEngineEvaluate);
+                     });
     }
     auto unevaluated =
         ComplexExpression(std::move(head), {}, std::move(evaluatedDynamics), std::move(spans));
@@ -754,32 +754,32 @@ static Expression evaluateDispatcher(Expression&& e, evaluteInternalFunction& wh
         auto [head, unused_, dynamics, spans] = std::move(unevaluated).decompose();
         unevaluated =
             ComplexExpression(Symbol("PartitionedJoin"), {}, std::move(dynamics), std::move(spans));
-        auto result =
-            get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
+        auto result = get<ComplexExpression>(
+            batchEvaluate(std::move(unevaluated), adaptiveEngineEvaluate, false));
         if(result.getHead().getName() == "Join") {
           return std::move(result);
         } else { // Could not evaluate in hazardAdaptiveLib (e.g. multi-key Join), evaluate in Velox
           auto [head, unused_, dynamics, spans] = std::move(result).decompose();
           unevaluated =
               ComplexExpression(Symbol("Join"), {}, std::move(dynamics), std::move(spans));
-          return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+          return batchEvaluate(std::move(unevaluated), veloxEngineEvaluate, false);
         }
       }
 #ifdef EVALUATE_NON_PARTITIONED_JOINS_IN_VELOX // Batch evaluate in Velox
-      return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
-#else // Batch evaluate in hazard adaptive engine
-      auto result =
-          get<ComplexExpression>(batchEvaluate(std::move(unevaluated), firstEngineEvaluate));
-      if(result.getHead().getName() == "Join") { // Hazard adaptive engine failed to evaluate
-        return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+      return batchEvaluate(std::move(unevaluated), veloxEngineEvaluate, false);
+#else // Batch evaluate in non-adaptive engine
+      auto result = get<ComplexExpression>(
+          batchEvaluate(std::move(unevaluated), nonAdaptiveEngineEvaluate, true));
+      if(result.getHead().getName() == "Join") { // Non-adaptive engine failed to evaluate
+        return batchEvaluate(std::move(unevaluated), veloxEngineEvaluate, false);
       }
       return std::move(result);
 #endif
     } else if(unevaluated.getHead().getName() == "Group") { // Pipeline breaker
-      return batchEvaluate(std::move(unevaluated), firstEngineEvaluate);
+      return batchEvaluate(std::move(unevaluated), adaptiveEngineEvaluate, false);
     } else if(unevaluated.getHead().getName() == "Top" ||
               unevaluated.getHead().getName() == "Order") { // Pipeline breaker
-      return batchEvaluate(std::move(unevaluated), pipelineEvaluateExceptFirstEngine);
+      return batchEvaluate(std::move(unevaluated), veloxEngineEvaluate, false);
     }
     return std::move(unevaluated);
   }
@@ -826,6 +826,10 @@ static Expression evaluateInternal(Expression&& e) {
     auto& expr = get<ComplexExpression>(dynamics.at(0));
 #endif
 
+    if(engines.size() < 3) {
+      throw std::runtime_error("Expected at least 3 execution engines after storage engine");
+    }
+
     evaluteInternalFunction wholePipelineEvaluate =
         [&engines](ComplexExpression&& e) -> Expression {
       auto* r = new BOSSExpression{std::move(e)};
@@ -858,37 +862,33 @@ static Expression evaluateInternal(Expression&& e) {
       return result;
     };
 
-    evaluteInternalFunction firstEngineEvaluate = [&engines](ComplexExpression&& e) -> Expression {
+    evaluteInternalFunction nonAdaptiveEngineEvaluate =
+        [&engines](ComplexExpression&& e) -> Expression {
       auto* r = new BOSSExpression{std::move(e)};
       auto* oldWrapper = r;
-      r = engines[0](r);
+      r = engines[vectorization::config::nonAdaptiveEngineIndex](r);
       freeBOSSExpression(oldWrapper);
       auto result = std::move(r->delegate);
       freeBOSSExpression(r);
       return result;
     };
 
-    evaluteInternalFunction pipelineEvaluateExceptFirstEngine =
+    evaluteInternalFunction adaptiveEngineEvaluate =
         [&engines](ComplexExpression&& e) -> Expression {
       auto* r = new BOSSExpression{std::move(e)};
-      auto engineIterator = std::next(engines.begin());
-      for(; engineIterator != engines.end(); ++engineIterator) {
-        auto* oldWrapper = r;
-#ifdef DEBUG_EXPR_SENT_TO_LAST_ENGINE
-        if(engineIterator == std::prev(engines.end())) {
-          Expression expr = std::move(r->delegate);
-          std::cout << "Last engine input expression: "
-                    << utilities::injectDebugInfoToSpansNumSpans(
-                           expr.clone(CloneReason::FOR_TESTING))
-                    << '\n'
-                    << std::endl;
-          r = new BOSSExpression{std::move(expr)};
-        }
+      auto* oldWrapper = r;
+      r = engines[vectorization::config::hazardAdaptiveEngineIndex](r);
+      freeBOSSExpression(oldWrapper);
+      auto result = std::move(r->delegate);
+      freeBOSSExpression(r);
+      return result;
+    };
 
-#endif
-        r = (*engineIterator)(r);
-        freeBOSSExpression(oldWrapper);
-      }
+    evaluteInternalFunction veloxEngineEvaluate = [&engines](ComplexExpression&& e) -> Expression {
+      auto* r = new BOSSExpression{std::move(e)};
+      auto* oldWrapper = r;
+      r = engines[vectorization::config::veloxEngineIndex](r);
+      freeBOSSExpression(oldWrapper);
       auto result = std::move(r->delegate);
       freeBOSSExpression(r);
       return result;
@@ -897,9 +897,9 @@ static Expression evaluateInternal(Expression&& e) {
     bool finalEvaluateRequired =
         !(expr.getHead().getName() == "Group" || expr.getHead().getName() == "Top" ||
           expr.getHead().getName() == "Order");
-    auto result = get<ComplexExpression>(evaluateDispatcher(std::move(expr), wholePipelineEvaluate,
-                                                            firstEngineEvaluate,
-                                                            pipelineEvaluateExceptFirstEngine));
+    auto result = get<ComplexExpression>(
+        evaluateDispatcher(std::move(expr), wholePipelineEvaluate, nonAdaptiveEngineEvaluate,
+                           adaptiveEngineEvaluate, veloxEngineEvaluate));
 #ifdef DEBUG_MODE_VERBOSE
     std::cout << "Result after all pipeline breakers evaluated: " << result << std::endl;
 #endif
@@ -912,7 +912,7 @@ static Expression evaluateInternal(Expression&& e) {
     if(!finalEvaluateRequired) { // Final evaluation not required if root was a Group, Top, or Order
       return result;
     }
-    return vectorizedEvaluate(std::move(result), wholePipelineEvaluate, true);
+    return vectorizedEvaluate(std::move(result), wholePipelineEvaluate);
   };
 }
 
