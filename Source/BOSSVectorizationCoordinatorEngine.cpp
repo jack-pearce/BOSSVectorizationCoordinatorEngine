@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 
+// TODO - set during build process
 #include "/home/jcp122/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 // #include "/repos/BOSSHazardAdaptiveEngine/Source/utilities/sharedDataTypes.hpp"
 #include "config.hpp"
